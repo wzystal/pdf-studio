@@ -1,0 +1,570 @@
+package com.pdfstudio.feature.reader
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.graphics.RectF
+import android.net.Uri
+import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.pdfstudio.core.pdfannot.CoordinateMapper
+import com.pdfstudio.core.pdfannot.model.AnnotationType
+import com.pdfstudio.core.pdfrender.RenderState
+import com.pdfstudio.feature.editor.EditorMode
+import com.pdfstudio.feature.editor.SignaturePadActivity
+import com.pdfstudio.feature.pageops.PageOpsDialogFragment
+import com.pdfstudio.feature.reader.databinding.ActivityReaderBinding
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.launch
+
+@AndroidEntryPoint
+class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
+
+    private lateinit var binding: ActivityReaderBinding
+    private val viewModel: ReaderViewModel by viewModels()
+    private lateinit var pageAdapter: PdfPageAdapter
+
+    private var pendingMergeSources: List<Uri> = emptyList()
+    private var pendingSplitRange: IntRange? = null
+    private var isUserScrolling = false
+    private var isPinchZooming = false
+    private var pinchStartZoom = 1f
+    private var pinchCumulativeScale = 1f
+    private lateinit var scaleDetector: ScaleGestureDetector
+    private var lastPageHeights: List<Int> = emptyList()
+    private var lastDocumentUri: String? = null
+
+    private val saveLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { uri ->
+        uri?.let { viewModel.saveAs(it) }
+    }
+
+    private val mergePickLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            pendingMergeSources = uris
+            mergeOutputLauncher.launch("merged_${System.currentTimeMillis()}.pdf")
+        }
+    }
+
+    private val mergeOutputLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { uri ->
+        uri?.let { viewModel.mergePdfs(pendingMergeSources, it) }
+    }
+
+    private val splitOutputLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { uri ->
+        val range = pendingSplitRange
+        if (uri != null && range != null) {
+            viewModel.splitPdf(listOf(range), listOf(uri))
+            pendingSplitRange = null
+        }
+    }
+
+    private val signatureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val base64 = result.data?.getStringExtra(SignaturePadActivity.EXTRA_SIGNATURE_BASE64)
+            base64?.let {
+                viewModel.addSignature(it)
+                viewModel.setEditMode(EditorMode.HIGHLIGHT)
+                pageAdapter.editMode = EditorMode.HIGHLIGHT
+                binding.editorToolbar.setSelectedMode(EditorMode.HIGHLIGHT)
+                pageAdapter.refreshEditMode()
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityReaderBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        setSupportActionBar(binding.toolbar)
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+
+        val uri = intent.getStringExtra(EXTRA_URI)?.let { Uri.parse(it) }
+            ?: run { finish(); return }
+
+        setupRecycler()
+        observeState()
+        observeRender()
+        setupToolbar()
+
+        viewModel.setTargetWidth(resources.displayMetrics.widthPixels)
+        viewModel.open(uri)
+    }
+
+    private fun runOnRecyclerIdle(block: () -> Unit) {
+        binding.recyclerPages.post {
+            val rv = binding.recyclerPages
+            if (!rv.isComputingLayout && rv.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
+                block()
+            } else {
+                runOnRecyclerIdle(block)
+            }
+        }
+    }
+
+    private fun onPageVisible(page: Int) {
+        viewModel.ensurePageHeights(page, page + 2)
+        if (viewModel.getCachedBitmap(page) != null) {
+            binding.recyclerPages.post { pageAdapter.notifyPageRenderComplete(page) }
+        } else {
+            viewModel.requestRender(page)
+        }
+    }
+
+    private fun updateVisiblePageIndicator() {
+        val lm = binding.recyclerPages.layoutManager as LinearLayoutManager
+        val first = lm.findFirstVisibleItemPosition()
+        val last = lm.findLastVisibleItemPosition()
+        if (first < 0) return
+        val current = if (last > first) (first + last) / 2 else first
+        pageAdapter.currentPage = current
+        viewModel.setCurrentPage(current)
+        updatePageIndicator(current)
+        if (!isPinchZooming) {
+            runOnRecyclerIdle { pageAdapter.setEditableRange(first, last) }
+        }
+        viewModel.ensurePageHeights(first, last + 2)
+    }
+
+    private fun renderFocalAndPreload() {
+        val lm = binding.recyclerPages.layoutManager as LinearLayoutManager
+        val first = lm.findFirstVisibleItemPosition()
+        val last = lm.findLastVisibleItemPosition()
+        if (first < 0) return
+        val current = if (last > first) (first + last) / 2 else first
+        val pageChanged = pageAdapter.currentPage != current
+        pageAdapter.currentPage = current
+        viewModel.setCurrentPage(current)
+        updatePageIndicator(current)
+        runOnRecyclerIdle { pageAdapter.setEditableRange(first, last) }
+        if (pageChanged && viewModel.uiState.value.editMode != EditorMode.READ) {
+            pageAdapter.refreshEditMode()
+        }
+        viewModel.ensurePageHeights(first, last + 2)
+        viewModel.requestRender(current)
+        for (i in first..last.coerceAtLeast(first)) {
+            if (i != current) {
+                viewModel.preloadPage(i)
+            }
+            if (viewModel.getCachedBitmap(i) != null) {
+                pageAdapter.notifyPageRenderComplete(i)
+            }
+        }
+    }
+
+    private fun setupRecycler() {
+        scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                pinchStartZoom = viewModel.uiState.value.zoomScale
+                pinchCumulativeScale = 1f
+                isPinchZooming = true
+                binding.recyclerPages.stopScroll()
+                return true
+            }
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                pinchCumulativeScale *= detector.scaleFactor
+                val preview = (pinchStartZoom * pinchCumulativeScale)
+                    .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
+                updatePageIndicator(pageAdapter.currentPage, preview)
+                return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                isPinchZooming = false
+                val finalScale = (pinchStartZoom * pinchCumulativeScale)
+                    .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
+                applyZoom(finalScale)
+            }
+        })
+
+        val horizontalPadding = (16 * resources.displayMetrics.density).toInt()
+        val viewportWidth = resources.displayMetrics.widthPixels - horizontalPadding
+
+        pageAdapter = PdfPageAdapter(
+            pageWidth = viewportWidth,
+            contentWidthProvider = { viewModel.getPageContentWidth() },
+            bitmapProvider = { page -> viewModel.getCachedBitmap(page) },
+            onPageVisible = { page -> onPageVisible(page) },
+            onSelectionFinished = { page, rect, type ->
+                viewModel.addHighlight(page, rect, type)
+            },
+            onInkFinished = { page, strokes -> viewModel.addInk(page, strokes) },
+            onTapForNote = { page, x, y ->
+                showNoteDialog(page, x, y)
+            },
+        )
+        binding.recyclerPages.layoutManager = LinearLayoutManager(this)
+        binding.recyclerPages.adapter = pageAdapter
+        binding.recyclerPages.setItemViewCacheSize(4)
+        binding.recyclerPages.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                updateVisiblePageIndicator()
+            }
+
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                when (newState) {
+                    RecyclerView.SCROLL_STATE_IDLE -> {
+                        isUserScrolling = false
+                        renderFocalAndPreload()
+                    }
+                    RecyclerView.SCROLL_STATE_DRAGGING,
+                    RecyclerView.SCROLL_STATE_SETTLING,
+                    -> isUserScrolling = true
+                }
+            }
+        })
+        binding.recyclerPages.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                if (pageAdapter.editMode == EditorMode.READ && (e.pointerCount >= 2 || isPinchZooming)) {
+                    rv.stopScroll()
+                    scaleDetector.onTouchEvent(e)
+                    return true
+                }
+                return false
+            }
+
+            override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
+                if (pageAdapter.editMode == EditorMode.READ && (e.pointerCount >= 2 || isPinchZooming)) {
+                    scaleDetector.onTouchEvent(e)
+                }
+            }
+        })
+    }
+
+    private fun applyZoom(scale: Float) {
+        viewModel.setZoomScale(scale)
+        pageAdapter.zoomScale = scale
+        pageAdapter.setPageHeights(viewModel.uiState.value.pageHeights)
+        runOnRecyclerIdle {
+            pageAdapter.notifyZoomChanged()
+            binding.recyclerPages.post { renderFocalAndPreload() }
+        }
+        updatePageIndicator(pageAdapter.currentPage, scale)
+    }
+
+    private fun setupToolbar() {
+        binding.editorToolbar.onModeSelected = { mode ->
+            viewModel.setEditMode(mode)
+            pageAdapter.editMode = mode
+            binding.editorToolbar.setSelectedMode(mode)
+            runOnRecyclerIdle { pageAdapter.refreshEditMode() }
+            if (mode == EditorMode.STAMP) {
+                signatureLauncher.launch(SignaturePadActivity.createIntent(this))
+            }
+        }
+        binding.editorToolbar.onUndo = { viewModel.undo() }
+    }
+
+    private fun observeState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.uiState.collect { state ->
+                    binding.progressBar.visibility = if (state.isLoading) View.VISIBLE else View.GONE
+                    binding.toolbar.title = state.displayName
+                    pageAdapter.setPageHeights(state.pageHeights)
+                    pageAdapter.zoomScale = state.zoomScale
+                    if (state.pageHeights != lastPageHeights && state.pageHeights.isNotEmpty()) {
+                        lastPageHeights = state.pageHeights
+                        if (pageAdapter.itemCount > 0) {
+                            runOnRecyclerIdle { pageAdapter.notifyZoomChanged() }
+                        }
+                    }
+                    runOnRecyclerIdle {
+                        val newDocument = state.documentUri != null && state.documentUri != lastDocumentUri
+                        if (newDocument) lastDocumentUri = state.documentUri
+                        if (pageAdapter.submitPageCount(state.pageCount, forceRefresh = newDocument)) {
+                            lastPageHeights = state.pageHeights
+                            pageAdapter.notifyDataSetChanged()
+                            binding.recyclerPages.post { renderFocalAndPreload() }
+                        }
+                    }
+                    val editModeChanged = pageAdapter.editMode != state.editMode
+                    pageAdapter.editMode = state.editMode
+                    binding.recyclerPages.isNestedScrollingEnabled = true
+                    binding.editorToolbar.setSelectedMode(
+                        if (state.editMode == EditorMode.READ) EditorMode.HIGHLIGHT else state.editMode,
+                    )
+                    if (editModeChanged) {
+                        val lm = binding.recyclerPages.layoutManager as? LinearLayoutManager
+                        if (lm != null && state.editMode != EditorMode.READ) {
+                            val first = lm.findFirstVisibleItemPosition()
+                            val last = lm.findLastVisibleItemPosition()
+                            if (first >= 0) {
+                                runOnRecyclerIdle { pageAdapter.setEditableRange(first, last) }
+                            }
+                        }
+                        runOnRecyclerIdle { pageAdapter.refreshEditMode() }
+                    }
+                    binding.editorToolbar.visibility =
+                        if (state.editMode != EditorMode.READ) View.VISIBLE else View.GONE
+                    invalidateOptionsMenu()
+                    updatePageIndicator(state.currentPage, state.zoomScale)
+                    state.error?.let {
+                        Toast.makeText(this@ReaderActivity, it, Toast.LENGTH_SHORT).show()
+                        viewModel.clearMessage()
+                    }
+                    state.message?.let {
+                        Toast.makeText(this@ReaderActivity, it, Toast.LENGTH_SHORT).show()
+                        viewModel.clearMessage()
+                    }
+                    if (state.needsPassword) showPasswordDialog()
+                }
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.annotations.collect { list ->
+                    val changedPages = pageAdapter.updateAnnotations(list)
+                    if (changedPages.isNotEmpty()) {
+                        pageAdapter.notifyAnnotationsChanged(changedPages)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun observeRender() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.renderState.collect { state ->
+                    when (state) {
+                        is RenderState.Success -> {
+                            binding.recyclerPages.post {
+                                pageAdapter.notifyPageRenderComplete(state.pageIndex)
+                            }
+                        }
+                        is RenderState.Error -> {
+                            Toast.makeText(
+                                this@ReaderActivity,
+                                getString(R.string.page_render_failed, state.pageIndex + 1, state.message),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updatePageIndicator(page: Int, zoomScale: Float = viewModel.uiState.value.zoomScale) {
+        val total = viewModel.uiState.value.pageCount
+        if (total > 0) {
+            val percent = (zoomScale * 100).toInt()
+            binding.tvPageIndicator.text = getString(
+                R.string.page_indicator_with_zoom,
+                page + 1,
+                total,
+                percent,
+            )
+        }
+    }
+
+    private fun showPasswordDialog() {
+        val input = EditText(this)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.password_required)
+            .setMessage(R.string.enter_password)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                viewModel.submitPassword(input.text.toString())
+            }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> finish() }
+            .show()
+    }
+
+    private fun showNoteDialog(pageIndex: Int, x: Float, y: Float) {
+        val input = EditText(this)
+        AlertDialog.Builder(this)
+            .setTitle(com.pdfstudio.feature.editor.R.string.enter_note)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val text = input.text.toString()
+                if (text.isNotBlank()) {
+                    val w = viewModel.getPageContentWidth()
+                    val h = viewModel.uiState.value.pageHeights.getOrElse(pageIndex) { (w * 1.4f).toInt() }
+                    val (nx, ny) = CoordinateMapper.deviceToNormalized(x, y, w, h)
+                    val rect = RectF(nx, ny, (nx + 0.3f).coerceAtMost(1f), (ny + 0.08f).coerceAtMost(1f))
+                    viewModel.addNote(pageIndex, rect, text)
+                }
+            }
+            .show()
+    }
+
+    private fun showSearchDialog() {
+        val input = EditText(this)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.search)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                viewModel.search(input.text.toString())
+                showSearchResults()
+            }
+            .show()
+    }
+
+    private fun showSearchResults() {
+        val results = viewModel.uiState.value.searchResults
+        if (results.isEmpty()) {
+            Toast.makeText(this, R.string.no_search_results, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = results.map { "第${it.pageIndex + 1}页：${it.snippet}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.search)
+            .setItems(items) { _, which ->
+                val page = results[which].pageIndex
+                binding.recyclerPages.scrollToPosition(page)
+                viewModel.renderPage(page)
+            }
+            .show()
+    }
+
+    private fun showBookmarks() {
+        val bookmarks = viewModel.uiState.value.bookmarks
+        if (bookmarks.isEmpty()) {
+            Toast.makeText(this, R.string.no_bookmarks, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = bookmarks.map { "${it.title}（第${it.pageIndex + 1}页）" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.bookmarks)
+            .setItems(items) { _, which ->
+                val page = bookmarks[which].pageIndex
+                binding.recyclerPages.scrollToPosition(page)
+            }
+            .show()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_reader, menu)
+        return true
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(R.id.action_edit)?.title = if (viewModel.uiState.value.editMode == EditorMode.READ) {
+            getString(R.string.edit_mode)
+        } else {
+            getString(R.string.read_mode)
+        }
+        return super.onPrepareOptionsMenu(menu)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            android.R.id.home -> { finish(); true }
+            R.id.action_edit -> {
+                viewModel.toggleEditMode()
+                true
+            }
+            R.id.action_save -> {
+                saveLauncher.launch("annotated_${System.currentTimeMillis()}.pdf")
+                true
+            }
+            R.id.action_search -> {
+                showSearchDialog()
+                true
+            }
+            R.id.action_bookmarks -> {
+                showBookmarks()
+                true
+            }
+            R.id.action_page_ops -> {
+                PageOpsDialogFragment.newInstance().show(supportFragmentManager, "page_ops")
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    override fun onRotatePage(degrees: Int) {
+        viewModel.rotateCurrentPage(degrees)
+    }
+
+    override fun onDeletePage() {
+        AlertDialog.Builder(this)
+            .setMessage(R.string.delete_page_confirm)
+            .setPositiveButton(android.R.string.ok) { _, _ -> viewModel.deleteCurrentPage() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    override fun onMergePdfs() {
+        mergePickLauncher.launch(arrayOf("application/pdf"))
+    }
+
+    override fun onSplitPdf() {
+        showSplitDialog()
+    }
+
+    private fun showSplitDialog() {
+        val total = viewModel.uiState.value.pageCount
+        if (total <= 0) return
+        val current = viewModel.uiState.value.currentPage + 1
+        val fromInput = EditText(this).apply {
+            hint = getString(R.string.split_from_page)
+            setText(current.toString())
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val toInput = EditText(this).apply {
+            hint = getString(R.string.split_to_page)
+            setText(current.toString())
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, 0)
+            addView(fromInput)
+            addView(toInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.split_range_title)
+            .setView(layout)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val from = fromInput.text.toString().toIntOrNull() ?: return@setPositiveButton
+                val to = toInput.text.toString().toIntOrNull() ?: return@setPositiveButton
+                if (from < 1 || to < from || to > total) {
+                    Toast.makeText(this, R.string.invalid_page_range, Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                pendingSplitRange = (from - 1)..(to - 1)
+                splitOutputLauncher.launch("split_p${from}-${to}_${System.currentTimeMillis()}.pdf")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    companion object {
+        private const val EXTRA_URI = "extra_uri"
+
+        fun createIntent(context: Context, uri: Uri): Intent {
+            return Intent(context, ReaderActivity::class.java).putExtra(EXTRA_URI, uri.toString())
+        }
+    }
+}

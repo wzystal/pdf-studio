@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="page_image">PDF 页面</string>
+    <string name="page_indicator">第 %1$d / %2$d 页</string>
+    <string name="page_indicator_with_zoom">第 %1$d / %2$d 页 · %3$d%%</string>
+    <string name="zoom_in">放大</string>
+    <string name="zoom_out">缩小</string>
+    <string name="zoom_reset">重置缩放</string>
+    <string name="edit_mode">编辑</string>
+    <string name="read_mode">阅读</string>
+    <string name="save">保存</string>
+    <string name="search">搜索</string>
+    <string name="bookmarks">目录</string>
+    <string name="page_ops">页面</string>
+    <string name="password_required">需要密码</string>
+    <string name="enter_password">请输入 PDF 密码</string>
+    <string name="open_failed">打开 PDF 失败</string>
+    <string name="save_success">保存成功</string>
+    <string name="save_failed">保存失败</string>
+    <string name="split_range_title">拆分页面范围</string>
+    <string name="split_from_page">起始页（从 1 开始）</string>
+    <string name="split_to_page">结束页（从 1 开始）</string>
+    <string name="invalid_page_range">页码范围无效</string>
+    <string name="split_success">已拆分为 %1$d 个文件</string>
+    <string name="no_search_results">未找到匹配内容</string>
+    <string name="no_bookmarks">暂无目录</string>
+    <string name="delete_page_confirm">确定删除当前页？</string>
+    <string name="signature_added">签名已添加到第 %1$d 页底部</string>
+    <string name="page_render_failed">第 %1$d 页渲染失败：%2$s</string>
+</resources>

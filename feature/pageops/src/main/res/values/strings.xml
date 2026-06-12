@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="page_operations">页面操作</string>
+    <string name="rotate_90">旋转 90°</string>
+    <string name="rotate_180">旋转 180°</string>
+    <string name="delete_page">删除当前页</string>
+    <string name="merge_pdfs">合并 PDF</string>
+    <string name="split_pdf">拆分页面</string>
+</resources>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="highlight">高亮</string>
+    <string name="underline">下划线</string>
+    <string name="ink">手绘</string>
+    <string name="note">便签</string>
+    <string name="signature">签名</string>
+    <string name="undo">撤销</string>
+    <string name="clear">清除</string>
+    <string name="done">完成</string>
+    <string name="enter_note">输入便签内容</string>
+    <string name="signature_title">手写签名</string>
+</resources>

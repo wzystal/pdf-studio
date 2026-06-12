@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="open_pdf">打开 PDF</string>
+    <string name="recent_files">最近打开</string>
+    <string name="no_recent_files">暂无最近文件，点击「打开 PDF」开始</string>
+</resources>

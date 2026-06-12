@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_edit"
+        android:title="@string/edit_mode"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_save"
+        android:title="@string/save"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_search"
+        android:title="@string/search"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_bookmarks"
+        android:title="@string/bookmarks"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_page_ops"
+        android:title="@string/page_ops"
+        app:showAsAction="never" />
+</menu>
