@@ -1,0 +1,63 @@
+name: Release APK & DingTalk
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Decode signing keystore
+        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > release.jks
+
+      - name: Build Release APK
+        env:
+          RELEASE_KEYSTORE_PATH: release.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: chmod +x gradlew && ./gradlew assembleRelease
+
+      - name: Version tag
+        id: ver
+        run: echo "tag=release-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Release ${{ steps.ver.outputs.tag }}
+          files: app/build/outputs/apk/release/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify DingTalk
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        run: |
+          URL="https://github.com/${{ github.repository }}/releases/tag/${{ steps.ver.outputs.tag }}"
+          curl -sS -X POST "$DINGTALK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg tag "${{ steps.ver.outputs.tag }}" \
+              --arg url "$URL" \
+              '{
+                msgtype: "markdown",
+                markdown: {
+                  title: "Release 构建成功",
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [打开 Release 页](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
+                }
+              }')"

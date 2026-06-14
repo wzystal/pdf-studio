@@ -2,6 +2,11 @@
 .gradle/
 .idea/
 local.properties
+keystore.properties
+signing/release.jks
+signing/secrets.local.properties
+*.jks
+*.keystore
 .DS_Store
 build/
 captures/
