@@ -1,53 +1,31 @@
 # Release 签名（本地）
 
-- `release.jks`：Release 签名证书（**已 gitignore，务必备份**）
-- `secrets.local.properties`：密码（**已 gitignore**）
-- 根目录 `keystore.properties`：本地 Gradle 用（**已 gitignore**）
+通用脚本在 **`~/tools/scripts/`**，不在各 Android 项目中重复维护。
 
-## 1. 生成本仓库 keystore（每个 Android 项目各一套）
+## 1. 生成本仓库 keystore
 
 ```bash
-bash scripts/generate-release-keystore.sh
+~/tools/scripts/generate-release-keystore.sh "$(pwd)"
 ```
 
 ## 2. 写入 GitHub Secrets
 
 ```bash
-gh auth login -h github.com
-export DINGTALK_WEBHOOK='钉钉机器人 Webhook 完整 URL'
-export PGYER_API_KEY='蒲公英 API Key（https://www.pgyer.com/account/api）'
+# 项目 Release 签名（每个 App 各一套 keystore）
+~/tools/scripts/setup-github-secrets.sh --project-dir "$(pwd)"
 
-# 写入当前 git remote 对应仓库
-bash scripts/setup-github-secrets.sh
-
-# 或指定 owner/repo（复制模板到新项目时用）
-bash scripts/setup-github-secrets.sh wzystal/pdf-studio
-bash scripts/setup-github-secrets.sh wzystal pdf-studio
+# 蒲公英 & 钉钉（多仓库共用，交互式引导输入）
+~/tools/scripts/setup-shared-secrets.sh
 ```
 
-验证：
+## 3. CI 脚本来源
 
-```bash
-gh secret list --repo wzystal/pdf-studio
-```
-
-## 3. 蒲公英分发
-
-Release 流水线在 push `main` 后会自动上传 APK 到蒲公英（需配置 `PGYER_API_KEY` Secret），钉钉通知优先推送国内安装页链接。
-
-本地手动上传：
-
-```bash
-export PGYER_API_KEY='你的 API Key'
-chmod +x scripts/pgyer_upload.sh
-./scripts/pgyer_upload.sh -k "$PGYER_API_KEY" -d "本地测试" app/build/outputs/apk/release/app-release.apk
-```
+GitHub Actions 从 [wzystal/android-ci-scripts](https://github.com/wzystal/android-ci-scripts) 拉取 `_tools/` 目录，无需在各项目保留 `scripts/`。
 
 ## 4. 本地打 Release 包
 
 ```bash
 ./gradlew assembleRelease
-# app/build/outputs/apk/release/app-release.apk
 ```
 
 密码见 `signing/secrets.local.properties`（仅本机，勿提交）。

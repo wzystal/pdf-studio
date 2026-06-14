@@ -216,9 +216,7 @@ pdf-studio/
 │   └── pageops/
 ├── .github/workflows/      # PR CI、Release 通知
 ├── build-and-install.sh    # 智能编译安装脚本
-├── scripts/
-│   ├── pgyer_upload.sh     # 上传 APK 到蒲公英
-│   └── setup-github-secrets.sh
+├── signing/                 # 本地 keystore（通用脚本见 ~/tools/scripts/）
 └── gradle/libs.versions.toml
 ```
 
@@ -263,9 +261,8 @@ push 到 `main` 后自动：编译 Release APK → 上传 GitHub Release → 上
 配置 Secrets：
 
 ```bash
-export PGYER_API_KEY='你的 API Key'
-export DINGTALK_WEBHOOK='钉钉 Webhook URL'
-bash scripts/setup-github-secrets.sh
+~/tools/scripts/setup-shared-secrets.sh
+~/tools/scripts/setup-github-secrets.sh --project-dir "$(pwd)"
 ```
 
 钉钉通知**优先推送蒲公英安装页**（国内免翻墙）；GitHub Release 链接作为备用。
