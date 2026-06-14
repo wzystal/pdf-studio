@@ -424,3 +424,9 @@ pdf-studio/
 ## License
 
 本项目使用的第三方库遵循各自开源协议（Pdfium、PDFBox-Android 等）。应用业务代码供学习与面试项目参考。
+
+---
+
+## CI 试跑
+
+`feat/ci-test`：验证 PR → CodeRabbit + CI → Merge → Release 钉钉通知链路。
