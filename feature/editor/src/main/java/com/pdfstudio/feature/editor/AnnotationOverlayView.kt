@@ -47,6 +47,7 @@ class AnnotationOverlayView @JvmOverloads constructor(
 
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val stampBitmapCache = mutableMapOf<String, Bitmap>()
+    private val strokePath = Path()
 
     var editMode: EditorMode = EditorMode.READ
         set(value) {
@@ -58,17 +59,11 @@ class AnnotationOverlayView @JvmOverloads constructor(
         set(value) {
             val prevInkCount = field.count { it.type == AnnotationType.INK }
             val newInkCount = value.count { it.type == AnnotationType.INK }
-            val prevStampCount = field.count { it.type == AnnotationType.STAMP }
-            val newStampCount = value.count { it.type == AnnotationType.STAMP }
-            val prevSize = field.size
             field = value
-            if (newInkCount >= prevInkCount) {
+            if (newInkCount > prevInkCount) {
                 inkStrokes.clear()
             }
-            if (newStampCount >= prevStampCount || value.size >= prevSize) {
-                pendingSelection = null
-            }
-            invalidate()
+            postInvalidateOnAnimation()
         }
 
     private var selectionStartX = 0f
@@ -92,7 +87,15 @@ class AnnotationOverlayView @JvmOverloads constructor(
         inkStrokes.clear()
         currentStroke.clear()
         pendingSelection = null
-        invalidate()
+        postInvalidateOnAnimation()
+    }
+
+    fun resetTransientState() {
+        isSelecting = false
+        isDrawingGesture = false
+        currentStroke.clear()
+        inkStrokes.clear()
+        pendingSelection = null
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -191,10 +194,12 @@ class AnnotationOverlayView @JvmOverloads constructor(
 
     private fun drawStroke(canvas: Canvas, stroke: List<Pair<Float, Float>>) {
         if (stroke.size < 2) return
-        val path = Path()
-        path.moveTo(stroke[0].first, stroke[0].second)
-        stroke.drop(1).forEach { (x, y) -> path.lineTo(x, y) }
-        canvas.drawPath(path, inkPaint)
+        strokePath.rewind()
+        strokePath.moveTo(stroke[0].first, stroke[0].second)
+        for (i in 1 until stroke.size) {
+            strokePath.lineTo(stroke[i].first, stroke[i].second)
+        }
+        canvas.drawPath(strokePath, inkPaint)
     }
 
     private fun drawNormalizedStroke(canvas: Canvas, stroke: List<Pair<Float, Float>>) {
@@ -211,7 +216,6 @@ class AnnotationOverlayView @JvmOverloads constructor(
     }
 
     private fun beginSelection(x: Float, y: Float) {
-        beginDrawingLayer()
         isSelecting = true
         selectionStartX = x
         selectionStartY = y
@@ -220,17 +224,22 @@ class AnnotationOverlayView @JvmOverloads constructor(
     }
 
     private fun beginInkStroke(x: Float, y: Float) {
-        beginDrawingLayer()
         currentStroke.clear()
         currentStroke.add(x to y)
     }
 
-    private fun beginDrawingLayer() {
-        setLayerType(LAYER_TYPE_HARDWARE, null)
+    private fun isDrawingMode(): Boolean {
+        return editMode == EditorMode.HIGHLIGHT ||
+            editMode == EditorMode.UNDERLINE ||
+            editMode == EditorMode.INK
     }
 
-    private fun endDrawingLayer() {
-        setLayerType(LAYER_TYPE_NONE, null)
+    private fun requestParentDisallowIntercept(disallow: Boolean) {
+        var parent = parent
+        while (parent != null) {
+            parent.requestDisallowInterceptTouchEvent(disallow)
+            parent = parent.parent
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -246,28 +255,20 @@ class AnnotationOverlayView @JvmOverloads constructor(
                         return true
                     }
                     EditorMode.STAMP -> return false
+                    EditorMode.INK -> {
+                        requestParentDisallowIntercept(true)
+                        beginInkStroke(event.x, event.y)
+                        isDrawingGesture = true
+                    }
+                    EditorMode.HIGHLIGHT, EditorMode.UNDERLINE -> {
+                        requestParentDisallowIntercept(true)
+                        beginSelection(event.x, event.y)
+                        isDrawingGesture = true
+                    }
                     else -> Unit
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!isDrawingGesture) {
-                    val dx = abs(event.x - downX)
-                    val dy = abs(event.y - downY)
-                    if (dx > touchSlop || dy > touchSlop) {
-                        if (dy > dx * 1.2f) {
-                            return false
-                        }
-                        isDrawingGesture = true
-                        parent?.requestDisallowInterceptTouchEvent(true)
-                        when (editMode) {
-                            EditorMode.HIGHLIGHT, EditorMode.UNDERLINE -> beginSelection(downX, downY)
-                            EditorMode.INK -> beginInkStroke(downX, downY)
-                            else -> return false
-                        }
-                    } else {
-                        return true
-                    }
-                }
                 when (editMode) {
                     EditorMode.HIGHLIGHT, EditorMode.UNDERLINE -> {
                         if (isSelecting) {
@@ -276,7 +277,7 @@ class AnnotationOverlayView @JvmOverloads constructor(
                         }
                     }
                     EditorMode.INK -> {
-                        if (currentStroke.isNotEmpty()) {
+                        if (isDrawingGesture) {
                             currentStroke.add(event.x to event.y)
                         }
                     }
@@ -284,22 +285,13 @@ class AnnotationOverlayView @JvmOverloads constructor(
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                parent?.requestDisallowInterceptTouchEvent(false)
-                endDrawingLayer()
+                requestParentDisallowIntercept(false)
                 if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
                     isSelecting = false
                     isDrawingGesture = false
                     currentStroke.clear()
-                    invalidate()
+                    postInvalidateOnAnimation()
                     return true
-                }
-                if (!isDrawingGesture) {
-                    when (editMode) {
-                        EditorMode.HIGHLIGHT, EditorMode.UNDERLINE -> beginSelection(downX, downY)
-                        EditorMode.INK -> beginInkStroke(downX, downY)
-                        else -> return false
-                    }
-                    isDrawingGesture = true
                 }
                 when (editMode) {
                     EditorMode.HIGHLIGHT, EditorMode.UNDERLINE -> {
@@ -317,7 +309,6 @@ class AnnotationOverlayView @JvmOverloads constructor(
                             pendingSelection = deviceRect to type
                             onSelectionFinished?.invoke(norm, type)
                         }
-                        invalidate()
                     }
                     EditorMode.INK -> {
                         if (currentStroke.size >= 2) {
@@ -329,14 +320,15 @@ class AnnotationOverlayView @JvmOverloads constructor(
                             onInkFinished?.invoke(listOf(normalized))
                         }
                         currentStroke.clear()
-                        invalidate()
                     }
                     else -> {}
                 }
                 isDrawingGesture = false
             }
         }
-        invalidate()
+        if (isDrawingMode()) {
+            postInvalidateOnAnimation()
+        }
         return true
     }
 }

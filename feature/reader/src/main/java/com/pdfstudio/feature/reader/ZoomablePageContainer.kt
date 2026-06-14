@@ -25,6 +25,9 @@ class ZoomablePageContainer @JvmOverloads constructor(
 
     var onRequestParentDisallowIntercept: ((Boolean) -> Unit)? = null
 
+    /** 编辑模式下禁用横向平移，避免与框选/手绘手势冲突 */
+    var panEnabled: Boolean = true
+
     fun setContentSize(widthPx: Int, heightPx: Int) {
         contentWidthPx = widthPx.coerceAtLeast(1)
         contentHeightPx = heightPx.coerceAtLeast(1)
@@ -76,7 +79,7 @@ class ZoomablePageContainer @JvmOverloads constructor(
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-        if (!canPanHorizontally()) return false
+        if (!panEnabled || !canPanHorizontally()) return false
         if (ev.pointerCount > 1) return false
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {

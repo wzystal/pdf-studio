@@ -144,18 +144,28 @@ class PdfPageAdapter(
         }
 
         fun bind(pageIndex: Int) {
+            binding.overlay.resetTransientState()
             bindZoom(pageIndex)
             bindBitmap(pageIndex)
             bindAnnotations(pageIndex)
             bindEditMode(pageIndex)
             binding.overlay.onSelectionFinished = { rect, type ->
-                onSelectionFinished(pageIndex, rect, type)
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onSelectionFinished(pos, rect, type)
+                }
             }
             binding.overlay.onInkFinished = { strokes ->
-                onInkFinished(pageIndex, strokes)
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onInkFinished(pos, strokes)
+                }
             }
             binding.overlay.onTapForNote = { x, y ->
-                onTapForNote(pageIndex, x, y)
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onTapForNote(pos, x, y)
+                }
             }
         }
 
@@ -183,6 +193,7 @@ class PdfPageAdapter(
         fun bindEditMode(pageIndex: Int) {
             val editable = editMode != EditorMode.READ && pageIndex in editableRange
             binding.overlay.editMode = if (editable) editMode else EditorMode.READ
+            binding.zoomContainer.panEnabled = !editable
         }
     }
 }
