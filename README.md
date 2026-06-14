@@ -1,10 +1,10 @@
-# PDF 工坊（PDF Studio）
+# PDF助手（PDF Studio）
 
 Android 原生 PDF 阅读与编辑应用。基于 **Pdfium** 做高速渲染，基于 **PDFBox-Android** 做文本提取、页面结构修改与标注导出。多模块分层架构，支持 SAF 打开本地文件、Room 持久化标注与最近文件记录。
 
 | 属性 | 值 |
 |------|-----|
-| 应用名 | PDF 工坊 |
+| 应用名 | PDF助手 |
 | 包名 | `com.pdfstudio.app` |
 | minSdk | 24 |
 | targetSdk / compileSdk | 34 |
@@ -216,9 +216,7 @@ pdf-studio/
 │   └── pageops/
 ├── .github/workflows/      # PR CI、Release 通知
 ├── build-and-install.sh    # 智能编译安装脚本
-├── scripts/
-│   ├── pgyer_upload.sh     # 上传 APK 到蒲公英
-│   └── setup-github-secrets.sh
+├── signing/                 # 本地 keystore（通用脚本见 ~/tools/scripts/）
 └── gradle/libs.versions.toml
 ```
 
@@ -263,9 +261,8 @@ push 到 `main` 后自动：编译 Release APK → 上传 GitHub Release → 上
 配置 Secrets：
 
 ```bash
-export PGYER_API_KEY='你的 API Key'
-export DINGTALK_WEBHOOK='钉钉 Webhook URL'
-bash scripts/setup-github-secrets.sh
+~/tools/scripts/setup-shared-secrets.sh
+~/tools/scripts/setup-github-secrets.sh --project-dir "$(pwd)"
 ```
 
 钉钉通知**优先推送蒲公英安装页**（国内免翻墙）；GitHub Release 链接作为备用。
