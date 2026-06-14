@@ -1,10 +1,10 @@
-# PDF 工坊（PDF Studio）
+# PDF助手（PDF Studio）
 
 Android 原生 PDF 阅读与编辑应用。基于 **Pdfium** 做高速渲染，基于 **PDFBox-Android** 做文本提取、页面结构修改与标注导出。多模块分层架构，支持 SAF 打开本地文件、Room 持久化标注与最近文件记录。
 
 | 属性 | 值 |
 |------|-----|
-| 应用名 | PDF 工坊 |
+| 应用名 | PDF助手 |
 | 包名 | `com.pdfstudio.app` |
 | minSdk | 24 |
 | targetSdk / compileSdk | 34 |
