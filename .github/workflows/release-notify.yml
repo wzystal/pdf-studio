@@ -3,6 +3,7 @@ name: Release APK & DingTalk
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -34,6 +35,7 @@ jobs:
         run: echo "tag=release-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
       - name: Upload to GitHub Release
+        id: gh_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
@@ -45,23 +47,29 @@ jobs:
 
       - name: Upload to PGYER
         id: pgyer
+        continue-on-error: true
         env:
           PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
         run: |
+          echo "skip=true" >> "$GITHUB_OUTPUT"
           if [[ -z "${PGYER_API_KEY}" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "PGYER_API_KEY 未配置，跳过蒲公英上传"
             exit 0
           fi
           chmod +x scripts/pgyer_upload.sh
-          INSTALL_URL=$(scripts/pgyer_upload.sh \
+          if INSTALL_URL=$(scripts/pgyer_upload.sh \
             -k "${PGYER_API_KEY}" \
             -d "Release ${{ steps.ver.outputs.tag }}" \
-            app/build/outputs/apk/release/app-release.apk)
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "install_url=${INSTALL_URL}" >> "$GITHUB_OUTPUT"
+            app/build/outputs/apk/release/app-release.apk); then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "install_url=${INSTALL_URL}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::蒲公英上传失败，钉钉将仅推送 GitHub Release 链接。请检查 PGYER_API_KEY 是否为蒲公英后台 API 信息页中的 API Key。"
+            exit 0
+          fi
 
       - name: Notify DingTalk
+        if: steps.gh_release.outcome == 'success'
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         run: |

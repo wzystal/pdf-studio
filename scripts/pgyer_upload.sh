@@ -41,6 +41,12 @@ apk_file="${1:-}"
 
 [[ -n "$api_key" && -f "$apk_file" ]] || usage
 
+api_key="$(printf '%s' "$api_key" | tr -d '[:space:]')"
+if [[ -z "$api_key" ]]; then
+  log "API Key 为空，请检查 PGYER_API_KEY Secret 或 -k 参数"
+  exit 1
+fi
+
 file_name="${apk_file##*/}"
 
 log() { echo "[pgyer] $*" >&2; }
@@ -50,7 +56,7 @@ token_args=(
   --connect-timeout "$CURL_CONNECT_TIMEOUT"
   --max-time "$CURL_MAX_TIME"
   --form-string "_api_key=${api_key}"
-  --form-string "buildType=apk"
+  --form-string "buildType=android"
   --form-string "buildInstallType=1"
   --form-string "buildUpdateDescription=${update_desc}"
 )
