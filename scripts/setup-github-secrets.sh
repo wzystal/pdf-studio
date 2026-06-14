@@ -27,6 +27,18 @@ gh secret set RELEASE_STORE_PASSWORD --repo "$REPO" --body "$STORE_PASSWORD"
 gh secret set RELEASE_KEY_ALIAS --repo "$REPO" --body "$KEY_ALIAS"
 gh secret set RELEASE_KEY_PASSWORD --repo "$REPO" --body "$KEY_PASSWORD"
 
+if [[ -n "${PGYER_API_KEY:-}" ]]; then
+  gh secret set PGYER_API_KEY --repo "$REPO" --body "$PGYER_API_KEY"
+  echo "已设置 PGYER_API_KEY"
+else
+  echo ""
+  echo "未设置 PGYER_API_KEY。蒲公英上传步骤将跳过。请执行："
+  echo "  export PGYER_API_KEY='蒲公英后台 API 信息页中的 API Key'"
+  echo "  $0"
+  echo "或："
+  echo "  gh secret set PGYER_API_KEY --repo $REPO"
+fi
+
 if [[ -n "${DINGTALK_WEBHOOK:-}" ]]; then
   gh secret set DINGTALK_WEBHOOK --repo "$REPO" --body "$DINGTALK_WEBHOOK"
   echo "已设置 DINGTALK_WEBHOOK"
