@@ -70,37 +70,32 @@ jobs:
           SKIP_PGYER="${{ steps.pgyer.outputs.skip }}"
 
           if [[ "$SKIP_PGYER" == "true" || -z "$PGYER_URL" ]]; then
-            BODY="### ✅ PdfStudio Release APK
-
-**仓库：** ${{ github.repository }}
-
-**版本：** ${{ steps.ver.outputs.tag }}
-
-**下载：** [GitHub Release](${GITHUB_URL})
-
-> 手机下载 app-release.apk 安装"
+            jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg tag "${{ steps.ver.outputs.tag }}" \
+              --arg url "$GITHUB_URL" \
+              '{
+                msgtype: "markdown",
+                markdown: {
+                  title: "Release 构建成功",
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [GitHub Release](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
+                }
+              }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
+                -H "Content-Type: application/json" \
+                -d @-
           else
-            BODY="### ✅ PdfStudio Release APK
-
-**仓库：** ${{ github.repository }}
-
-**版本：** ${{ steps.ver.outputs.tag }}
-
-**国内下载（推荐）：** [蒲公英安装页](${PGYER_URL})
-
-**GitHub：** [Release 页](${GITHUB_URL})
-
-> 国内用户优先使用蒲公英链接，无需翻墙"
+            jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg tag "${{ steps.ver.outputs.tag }}" \
+              --arg github_url "$GITHUB_URL" \
+              --arg pgyer_url "$PGYER_URL" \
+              '{
+                msgtype: "markdown",
+                markdown: {
+                  title: "Release 构建成功",
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**国内下载（推荐）：** [蒲公英安装页](" + $pgyer_url + ")\n\n**GitHub：** [Release 页](" + $github_url + ")\n\n> 国内用户优先使用蒲公英链接，无需翻墙")
+                }
+              }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
+                -H "Content-Type: application/json" \
+                -d @-
           fi
-
-          jq -n \
-            --arg body "$BODY" \
-            '{
-              msgtype: "markdown",
-              markdown: {
-                title: "Release 构建成功",
-                text: $body
-              }
-            }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
-              -H "Content-Type: application/json" \
-              -d @-

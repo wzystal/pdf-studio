@@ -15,7 +15,7 @@ bash scripts/generate-release-keystore.sh
 ```bash
 gh auth login -h github.com
 export DINGTALK_WEBHOOK='钉钉机器人 Webhook 完整 URL'
-export PGYER_API_KEY='蒲公英 API Key（https://www.pgyer.com/account/api ）'
+export PGYER_API_KEY='蒲公英 API Key（https://www.pgyer.com/account/api）'
 
 # 写入当前 git remote 对应仓库
 bash scripts/setup-github-secrets.sh

@@ -6,22 +6,25 @@ set -euo pipefail
 API_BASE="https://www.pgyer.com/apiv2"
 MAX_POLL=60
 POLL_INTERVAL=3
+CURL_CONNECT_TIMEOUT=30
+CURL_MAX_TIME=300
+CURL_UPLOAD_MAX_TIME=1800
 
 usage() {
   cat <<'EOF'
-Usage: pgyer_upload.sh -k <api_key> [-d <update_desc>] <apk_file>
+Usage: pgyer_upload.sh -k <api_key> [-d <update_desc>] [-c <channel>] <apk_file>
 
 上传 Android APK 到蒲公英，成功后输出安装页 URL（最后一行）。
 
 环境变量（可选）:
-  PGYER_CHANNEL_SHORTCUT  指定渠道短链接
+  PGYER_CHANNEL_SHORTCUT  指定渠道短链接（可被 -c 覆盖）
 EOF
   exit 1
 }
 
 api_key=""
 update_desc=""
-channel=""
+channel="${PGYER_CHANNEL_SHORTCUT:-}"
 apk_file=""
 
 while getopts 'k:d:c:h' opt; do
@@ -43,13 +46,21 @@ file_name="${apk_file##*/}"
 log() { echo "[pgyer] $*" >&2; }
 
 # Step 1: getCOSToken
+token_args=(
+  --connect-timeout "$CURL_CONNECT_TIMEOUT"
+  --max-time "$CURL_MAX_TIME"
+  --form-string "_api_key=${api_key}"
+  --form-string "buildType=apk"
+  --form-string "buildInstallType=1"
+  --form-string "buildUpdateDescription=${update_desc}"
+)
+if [[ -n "$channel" ]]; then
+  token_args+=(--form-string "buildChannelShortcut=${channel}")
+fi
+
 token_body=$(
   curl -fsS -X POST "${API_BASE}/app/getCOSToken" \
-    --form-string "_api_key=${api_key}" \
-    --form-string "buildType=apk" \
-    --form-string "buildInstallType=1" \
-    --form-string "buildUpdateDescription=${update_desc}" \
-    ${channel:+--form-string "buildChannelShortcut=${channel}"}
+    "${token_args[@]}"
 )
 
 code=$(echo "$token_body" | jq -r '.code')
@@ -67,6 +78,8 @@ cos_key=$(echo "$token_body" | jq -r '.data.params.key')
 # Step 2: upload file
 http_code=$(
   curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_UPLOAD_MAX_TIME" \
     --form-string "key=${cos_key}" \
     --form-string "signature=${signature}" \
     --form-string "x-cos-security-token=${cos_token}" \
@@ -83,7 +96,12 @@ log "APK 已上传，等待蒲公英发布..."
 
 # Step 3: poll buildInfo
 for ((i = 1; i <= MAX_POLL; i++)); do
-  info=$(curl -fsS "${API_BASE}/app/buildInfo?_api_key=${api_key}&buildKey=${build_key}")
+  info=$(
+    curl -fsS \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+      --max-time "$CURL_MAX_TIME" \
+      "${API_BASE}/app/buildInfo?_api_key=${api_key}&buildKey=${build_key}"
+  )
   code=$(echo "$info" | jq -r '.code')
 
   if [[ "$code" == "0" ]]; then
