@@ -68,6 +68,15 @@ jobs:
             exit 0
           fi
 
+      - name: Prepare release notes
+        if: steps.gh_release.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/concise_release_notes.sh
+          BODY=$(gh release view "${{ steps.ver.outputs.tag }}" --json body -q .body)
+          printf '%s' "$BODY" | scripts/concise_release_notes.sh > /tmp/release_notes.txt
+
       - name: Notify DingTalk
         if: steps.gh_release.outcome == 'success'
         env:
@@ -82,11 +91,12 @@ jobs:
               --arg repo "${{ github.repository }}" \
               --arg tag "${{ steps.ver.outputs.tag }}" \
               --arg url "$GITHUB_URL" \
+              --rawfile notes /tmp/release_notes.txt \
               '{
                 msgtype: "markdown",
                 markdown: {
                   title: "Release 构建成功",
-                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [GitHub Release](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**更新说明：**\n\n" + $notes + "\n\n**下载：** [GitHub Release](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
                 }
               }' | curl -sS --fail-with-body --retry 3 --retry-all-errors -X POST "$DINGTALK_WEBHOOK" \
                 -H "Content-Type: application/json" \
@@ -97,11 +107,12 @@ jobs:
               --arg tag "${{ steps.ver.outputs.tag }}" \
               --arg github_url "$GITHUB_URL" \
               --arg pgyer_url "$PGYER_URL" \
+              --rawfile notes /tmp/release_notes.txt \
               '{
                 msgtype: "markdown",
                 markdown: {
                   title: "Release 构建成功",
-                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**国内下载（推荐）：** [蒲公英安装页](" + $pgyer_url + ")\n\n**GitHub：** [Release 页](" + $github_url + ")\n\n> 国内用户优先使用蒲公英链接，无需翻墙")
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**更新说明：**\n\n" + $notes + "\n\n**国内下载（推荐）：** [蒲公英安装页](" + $pgyer_url + ")\n\n**GitHub：** [Release 页](" + $github_url + ")\n\n> 国内用户优先使用蒲公英链接，无需翻墙")
                 }
               }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
                 -H "Content-Type: application/json" \
