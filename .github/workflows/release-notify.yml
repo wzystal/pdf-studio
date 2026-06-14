@@ -80,9 +80,9 @@ jobs:
                   title: "Release 构建成功",
                   text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [GitHub Release](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
                 }
-              }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
+              }' | curl -sS --fail-with-body --retry 3 --retry-all-errors -X POST "$DINGTALK_WEBHOOK" \
                 -H "Content-Type: application/json" \
-                -d @-
+                -d `@-`
           else
             jq -n \
               --arg repo "${{ github.repository }}" \
