@@ -216,6 +216,9 @@ pdf-studio/
 │   └── pageops/
 ├── .github/workflows/      # PR CI、Release 通知
 ├── build-and-install.sh    # 智能编译安装脚本
+├── scripts/
+│   ├── pgyer_upload.sh     # 上传 APK 到蒲公英
+│   └── setup-github-secrets.sh
 └── gradle/libs.versions.toml
 ```
 
@@ -247,12 +250,32 @@ cd pdf-studio
 
 环境要求：**JDK 17**、**Android SDK 34**、USB 调试已开启。
 
+### Release 分发（蒲公英 + 钉钉）
+
+push 到 `main` 后自动：编译 Release APK → 上传 GitHub Release → 上传[蒲公英](https://www.pgyer.com) → 钉钉通知。
+
+| Secret | 说明 |
+|--------|------|
+| `PGYER_API_KEY` | 蒲公英后台 [API 信息](https://www.pgyer.com/account/api) 中的 API Key |
+| `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook |
+| `RELEASE_*` | Release 签名相关（见 `signing/README.md`） |
+
+配置 Secrets：
+
+```bash
+export PGYER_API_KEY='你的 API Key'
+export DINGTALK_WEBHOOK='钉钉 Webhook URL'
+bash scripts/setup-github-secrets.sh
+```
+
+钉钉通知**优先推送蒲公英安装页**（国内免翻墙）；GitHub Release 链接作为备用。
+
 ### CI
 
 | Workflow | 触发 | 行为 |
 |----------|------|------|
 | `pr-ci.yml` | Pull Request | `assembleDebug` |
-| `release-notify.yml` | push `main` | Release APK + GitHub Release + 钉钉通知 |
+| `release-notify.yml` | push `main` | Release APK → GitHub Release + 蒲公英 + 钉钉通知 |
 
 ---
 

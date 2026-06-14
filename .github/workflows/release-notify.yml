@@ -43,21 +43,59 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload to PGYER
+        id: pgyer
+        env:
+          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+        run: |
+          if [[ -z "${PGYER_API_KEY}" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "PGYER_API_KEY 未配置，跳过蒲公英上传"
+            exit 0
+          fi
+          chmod +x scripts/pgyer_upload.sh
+          INSTALL_URL=$(scripts/pgyer_upload.sh \
+            -k "${PGYER_API_KEY}" \
+            -d "Release ${{ steps.ver.outputs.tag }}" \
+            app/build/outputs/apk/release/app-release.apk)
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "install_url=${INSTALL_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Notify DingTalk
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         run: |
-          URL="https://github.com/${{ github.repository }}/releases/tag/${{ steps.ver.outputs.tag }}"
-          curl -sS -X POST "$DINGTALK_WEBHOOK" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
+          GITHUB_URL="https://github.com/${{ github.repository }}/releases/tag/${{ steps.ver.outputs.tag }}"
+          PGYER_URL="${{ steps.pgyer.outputs.install_url }}"
+          SKIP_PGYER="${{ steps.pgyer.outputs.skip }}"
+
+          if [[ "$SKIP_PGYER" == "true" || -z "$PGYER_URL" ]]; then
+            jq -n \
               --arg repo "${{ github.repository }}" \
               --arg tag "${{ steps.ver.outputs.tag }}" \
-              --arg url "$URL" \
+              --arg url "$GITHUB_URL" \
               '{
                 msgtype: "markdown",
                 markdown: {
                   title: "Release 构建成功",
-                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [打开 Release 页](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**下载：** [GitHub Release](" + $url + ")\n\n> 手机下载 app-release.apk 安装")
                 }
-              }')"
+              }' | curl -sS --fail-with-body --retry 3 --retry-all-errors -X POST "$DINGTALK_WEBHOOK" \
+                -H "Content-Type: application/json" \
+                -d `@-`
+          else
+            jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg tag "${{ steps.ver.outputs.tag }}" \
+              --arg github_url "$GITHUB_URL" \
+              --arg pgyer_url "$PGYER_URL" \
+              '{
+                msgtype: "markdown",
+                markdown: {
+                  title: "Release 构建成功",
+                  text: ("### ✅ PdfStudio Release APK\n\n**仓库：** " + $repo + "\n\n**版本：** " + $tag + "\n\n**国内下载（推荐）：** [蒲公英安装页](" + $pgyer_url + ")\n\n**GitHub：** [Release 页](" + $github_url + ")\n\n> 国内用户优先使用蒲公英链接，无需翻墙")
+                }
+              }' | curl -sS -X POST "$DINGTALK_WEBHOOK" \
+                -H "Content-Type: application/json" \
+                -d @-
+          fi
