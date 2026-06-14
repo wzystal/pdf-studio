@@ -145,9 +145,11 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         viewModel.setCurrentPage(current)
         updatePageIndicator(current)
         if (!isPinchZooming) {
-            runOnRecyclerIdle { pageAdapter.setEditableRange(first, last) }
+            pageAdapter.setEditableRange(first, last)
         }
-        viewModel.ensurePageHeights(first, last + 2)
+        if (!isUserScrolling) {
+            viewModel.ensurePageHeights(first, last + 2)
+        }
     }
 
     private fun renderFocalAndPreload() {
@@ -156,22 +158,23 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         val last = lm.findLastVisibleItemPosition()
         if (first < 0) return
         val current = if (last > first) (first + last) / 2 else first
-        val pageChanged = pageAdapter.currentPage != current
         pageAdapter.currentPage = current
         viewModel.setCurrentPage(current)
         updatePageIndicator(current)
-        runOnRecyclerIdle { pageAdapter.setEditableRange(first, last) }
-        if (pageChanged && viewModel.uiState.value.editMode != EditorMode.READ) {
-            pageAdapter.refreshEditMode()
-        }
+        pageAdapter.setEditableRange(first, last)
         viewModel.ensurePageHeights(first, last + 2)
-        viewModel.requestRender(current)
-        for (i in first..last.coerceAtLeast(first)) {
-            if (i != current) {
-                viewModel.preloadPage(i)
-            }
-            if (viewModel.getCachedBitmap(i) != null) {
-                pageAdapter.notifyPageRenderComplete(i)
+        val inEditMode = viewModel.uiState.value.editMode != EditorMode.READ
+        if (!inEditMode || viewModel.getCachedBitmap(current) == null) {
+            viewModel.requestRender(current)
+        }
+        if (!inEditMode) {
+            for (i in first..last.coerceAtLeast(first)) {
+                if (i != current) {
+                    viewModel.preloadPage(i)
+                }
+                if (viewModel.getCachedBitmap(i) != null) {
+                    pageAdapter.notifyPageRenderComplete(i)
+                }
             }
         }
     }
@@ -240,7 +243,7 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         })
         binding.recyclerPages.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
             override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
-                if (pageAdapter.editMode == EditorMode.READ && (e.pointerCount >= 2 || isPinchZooming)) {
+                if (e.pointerCount >= 2 || isPinchZooming) {
                     rv.stopScroll()
                     scaleDetector.onTouchEvent(e)
                     return true
@@ -249,7 +252,7 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
             }
 
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
-                if (pageAdapter.editMode == EditorMode.READ && (e.pointerCount >= 2 || isPinchZooming)) {
+                if (e.pointerCount >= 2 || isPinchZooming) {
                     scaleDetector.onTouchEvent(e)
                 }
             }

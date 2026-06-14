@@ -22,16 +22,20 @@ object UriDisplayNameResolver {
     }
 
     private fun queryDisplayName(context: Context, uri: Uri): String? {
-        return context.contentResolver.query(
-            uri,
-            arrayOf(OpenableColumns.DISPLAY_NAME),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index < 0 || !cursor.moveToFirst()) return@use null
-            cursor.getString(index)?.takeIf { it.isNotBlank() }
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index < 0 || !cursor.moveToFirst()) return@use null
+                cursor.getString(index)?.takeIf { it.isNotBlank() }
+            }
+        } catch (_: SecurityException) {
+            null
         }
     }
 

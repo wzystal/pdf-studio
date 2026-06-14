@@ -279,7 +279,10 @@ class ReaderViewModel @Inject constructor(
                 documentUri = uri,
                 pageIndex = pageIndex,
                 rect = rect,
-                color = Color.argb(100, 255, 235, 59),
+                color = when (type) {
+                    AnnotationType.UNDERLINE -> Color.argb(220, 255, 152, 0)
+                    else -> Color.argb(100, 255, 235, 59)
+                },
                 type = type,
             )
         }
