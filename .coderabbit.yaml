@@ -1,6 +1,11 @@
-# CodeRabbit — https://docs.coderabbit.ai/guides/configure-coderabbit
+# CodeRabbit — https://docs.coderabbit.ai/reference/configuration
+language: zh-CN
+
 reviews:
   auto_review:
     enabled: true
     base_branches:
       - main
+
+chat:
+  auto_reply: true
