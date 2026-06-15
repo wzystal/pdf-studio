@@ -33,8 +33,9 @@ class PdfRepository @Inject constructor(
     }
 
     fun close() {
-        currentDocument?.let { pdfEngine.closeDocument(it) }
+        val doc = currentDocument
         currentDocument = null
+        doc?.let { pdfEngine.closeDocument(it) }
     }
 
     fun requiresPassword(result: AppResult.Error): Boolean {

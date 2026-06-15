@@ -10,9 +10,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -49,8 +50,8 @@ class RenderEngine @Inject constructor(
         override fun sizeOf(key: PageRenderKey, value: Bitmap): Int = value.byteCount
     }
 
-    private val _renderEvents = MutableSharedFlow<RenderState>(extraBufferCapacity = 16)
-    val renderState: SharedFlow<RenderState> = _renderEvents.asSharedFlow()
+    private val _renderState = MutableStateFlow<RenderState>(RenderState.Idle)
+    val renderState: StateFlow<RenderState> = _renderState.asStateFlow()
 
     @Volatile
     private var useRgb565 = false
@@ -60,22 +61,30 @@ class RenderEngine @Inject constructor(
     }
 
     fun evictCache() {
-        focalJob?.cancel()
-        focalJob = null
+        cancelAllRenders()
         bitmapCache.evictAll()
+        _renderState.value = RenderState.Idle
     }
 
     fun previewWidth(targetWidth: Int): Int = max(targetWidth / 2, 360)
 
     fun getCached(pageIndex: Int, targetWidth: Int): Bitmap? {
-        return bitmapCache.get(PageRenderKey(pageIndex, targetWidth))
-            ?: bitmapCache.get(PageRenderKey(pageIndex, previewWidth(targetWidth)))
+        bitmapCache.get(PageRenderKey(pageIndex, targetWidth))?.let { return it }
+        bitmapCache.get(PageRenderKey(pageIndex, previewWidth(targetWidth)))?.let { return it }
+        // 缩放切换分辨率桶时，先用同页已有缓存顶住，避免黑屏
+        return bitmapCache.snapshot()
+            .filterKeys { it.pageIndex == pageIndex }
+            .maxByOrNull { it.key.widthBucket }
+            ?.value
     }
 
-    fun cancelPending() {
-        focalJob?.cancel()
+    /** 取消所有进行中的渲染（含 preload），关闭文档前必须调用 */
+    fun cancelAllRenders() {
+        scope.coroutineContext[Job]?.cancelChildren(CancellationException("Render cancelled"))
         focalJob = null
     }
+
+    fun cancelPending() = cancelAllRenders()
 
     /** 优先渲染当前页：先出低清预览，再补高清 */
     fun renderPage(
@@ -84,54 +93,60 @@ class RenderEngine @Inject constructor(
         targetWidth: Int,
         preloadNeighbors: Boolean = true,
     ) {
-        if (pageIndex < 0 || pageIndex >= handle.pageCount) return
+        if (handle.isClosed || pageIndex < 0 || pageIndex >= handle.pageCount) return
         val fullKey = PageRenderKey(pageIndex, targetWidth)
         val previewKey = PageRenderKey(pageIndex, previewWidth(targetWidth))
 
         bitmapCache.get(fullKey)?.let {
-            _renderEvents.tryEmit(RenderState.Success(pageIndex, it, targetWidth))
+            _renderState.value = RenderState.Success(pageIndex, it, targetWidth)
             if (preloadNeighbors) schedulePreload(handle, pageIndex, targetWidth)
             return
         }
         bitmapCache.get(previewKey)?.let {
-            _renderEvents.tryEmit(RenderState.Success(pageIndex, it, previewWidth(targetWidth)))
+            _renderState.value = RenderState.Success(pageIndex, it, previewWidth(targetWidth))
         }
 
         focalJob?.cancel()
-        _renderEvents.tryEmit(RenderState.Loading(pageIndex))
+        _renderState.value = RenderState.Loading(pageIndex)
         focalJob = scope.launch {
             try {
+                if (handle.isClosed) return@launch
                 if (bitmapCache.get(fullKey) == null && bitmapCache.get(previewKey) == null) {
                     renderAndCache(handle, pageIndex, previewWidth(targetWidth))?.let { bitmap ->
-                        _renderEvents.emit(RenderState.Success(pageIndex, bitmap, previewWidth(targetWidth)))
+                        _renderState.value = RenderState.Success(pageIndex, bitmap, previewWidth(targetWidth))
                     }
                 }
+                if (handle.isClosed) return@launch
                 if (bitmapCache.get(fullKey) == null) {
                     renderAndCache(handle, pageIndex, targetWidth)?.let { bitmap ->
-                        _renderEvents.emit(RenderState.Success(pageIndex, bitmap, targetWidth))
+                        _renderState.value = RenderState.Success(pageIndex, bitmap, targetWidth)
                     }
                 }
-                if (preloadNeighbors) schedulePreload(handle, pageIndex, targetWidth)
+                if (!handle.isClosed && preloadNeighbors) {
+                    schedulePreload(handle, pageIndex, targetWidth)
+                }
             } catch (_: CancellationException) {
             }
         }
     }
 
     fun preloadPage(handle: PdfDocumentHandle, pageIndex: Int, targetWidth: Int) {
-        if (pageIndex < 0 || pageIndex >= handle.pageCount) return
+        if (handle.isClosed || pageIndex < 0 || pageIndex >= handle.pageCount) return
         val fullKey = PageRenderKey(pageIndex, targetWidth)
         if (bitmapCache.get(fullKey) != null) return
         scope.launch {
             try {
+                if (handle.isClosed) return@launch
                 if (bitmapCache.get(fullKey) == null) {
                     val previewKey = PageRenderKey(pageIndex, previewWidth(targetWidth))
                     if (bitmapCache.get(previewKey) == null) {
                         renderAndCache(handle, pageIndex, previewWidth(targetWidth))?.let { bitmap ->
-                            _renderEvents.tryEmit(RenderState.Success(pageIndex, bitmap, previewWidth(targetWidth)))
+                            _renderState.value = RenderState.Success(pageIndex, bitmap, previewWidth(targetWidth))
                         }
                     }
+                    if (handle.isClosed) return@launch
                     renderAndCache(handle, pageIndex, targetWidth)?.let { bitmap ->
-                        _renderEvents.tryEmit(RenderState.Success(pageIndex, bitmap, targetWidth))
+                        _renderState.value = RenderState.Success(pageIndex, bitmap, targetWidth)
                     }
                 }
             } catch (_: CancellationException) {
@@ -140,7 +155,7 @@ class RenderEngine @Inject constructor(
     }
 
     private fun schedulePreload(handle: PdfDocumentHandle, centerPage: Int, targetWidth: Int) {
-        if (handle.pageCount > 80) return
+        if (handle.isClosed || handle.pageCount > 80) return
         listOf(centerPage - 1, centerPage + 1).forEach { index ->
             preloadPage(handle, index, targetWidth)
         }
@@ -151,7 +166,7 @@ class RenderEngine @Inject constructor(
         pageIndex: Int,
         renderWidth: Int,
     ): Bitmap? {
-        if (pageIndex < 0 || pageIndex >= handle.pageCount) return null
+        if (handle.isClosed || pageIndex < 0 || pageIndex >= handle.pageCount) return null
         val key = PageRenderKey(pageIndex, renderWidth)
         bitmapCache.get(key)?.let { return it }
         return withContext(dispatchers.io) {
@@ -162,13 +177,13 @@ class RenderEngine @Inject constructor(
                     bitmapCache.put(key, bitmap)
                     bitmap
                 } catch (e: PdfRenderException) {
-                    _renderEvents.tryEmit(RenderState.Error(pageIndex, e.message ?: "Render failed"))
+                    _renderState.value = RenderState.Error(pageIndex, e.message ?: "Render failed")
                     null
                 } catch (e: OutOfMemoryError) {
-                    _renderEvents.tryEmit(RenderState.Error(pageIndex, "内存不足，无法渲染该页"))
+                    _renderState.value = RenderState.Error(pageIndex, "内存不足，无法渲染该页")
                     null
                 } catch (e: Exception) {
-                    _renderEvents.tryEmit(RenderState.Error(pageIndex, e.message ?: "Render failed"))
+                    _renderState.value = RenderState.Error(pageIndex, e.message ?: "Render failed")
                     null
                 }
             }
@@ -180,7 +195,7 @@ class RenderEngine @Inject constructor(
         pageIndex: Int,
         targetWidth: Int,
     ): Bitmap? {
-        if (pageIndex < 0 || pageIndex >= handle.pageCount) return null
+        if (handle.isClosed || pageIndex < 0 || pageIndex >= handle.pageCount) return null
         return getCached(pageIndex, targetWidth) ?: run {
             try {
                 val config = if (useRgb565) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888

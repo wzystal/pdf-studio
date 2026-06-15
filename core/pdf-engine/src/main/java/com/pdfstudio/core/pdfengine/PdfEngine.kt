@@ -10,7 +10,6 @@ import com.pdfstudio.core.common.result.AppResult
 import com.pdfstudio.core.pdfengine.model.PdfBookmark
 import com.pdfstudio.core.pdfengine.model.PdfDocumentHandle
 import com.pdfstudio.core.pdfengine.model.PdfMeta
-import com.pdfstudio.core.pdfengine.model.PdfSearchResult
 import com.shockwave.pdfium.PdfDocument
 import com.shockwave.pdfium.PdfiumCore
 import com.shockwave.pdfium.util.Size
@@ -26,6 +25,63 @@ class PdfEngine @Inject constructor(
     @Volatile
     private var pdfiumCore: PdfiumCore? = null
 
+    /** pdfium 全局非线程安全，所有 native 调用必须串行 */
+    private val pdfiumLock = Any()
+
+    @Volatile
+    private var opsInFlight = 0
+
+    fun awaitIdle(timeoutMs: Long = 5000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(pdfiumLock) {
+            while (opsInFlight > 0 && System.currentTimeMillis() < deadline) {
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                (pdfiumLock as Object).wait(20)
+            }
+        }
+    }
+
+    private inline fun <T> runPdfium(block: () -> T): T {
+        synchronized(pdfiumLock) {
+            opsInFlight++
+            try {
+                return block()
+            } finally {
+                opsInFlight--
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                (pdfiumLock as Object).notifyAll()
+            }
+        }
+    }
+
+    private inline fun <T> runPdfiumFor(handle: PdfDocumentHandle, default: T, block: () -> T): T {
+        synchronized(pdfiumLock) {
+            if (handle.isClosed) return default
+            opsInFlight++
+            try {
+                return block()
+            } finally {
+                opsInFlight--
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                (pdfiumLock as Object).notifyAll()
+            }
+        }
+    }
+
+    private inline fun <T> runPdfiumForRequired(handle: PdfDocumentHandle, block: () -> T): T {
+        synchronized(pdfiumLock) {
+            if (handle.isClosed) throw PdfRenderException("Document already closed")
+            opsInFlight++
+            try {
+                return block()
+            } finally {
+                opsInFlight--
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                (pdfiumLock as Object).notifyAll()
+            }
+        }
+    }
+
     fun ensureInitialized(): PdfiumCore {
         return pdfiumCore ?: synchronized(this) {
             pdfiumCore ?: PdfiumCore(context).also { pdfiumCore = it }
@@ -34,27 +90,29 @@ class PdfEngine @Inject constructor(
 
     fun openDocument(uri: Uri, password: String? = null): AppResult<PdfDocumentHandle> {
         return try {
-            val core = ensureInitialized()
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-                ?: return AppResult.Error("Cannot open file descriptor for $uri")
-            val doc = if (password.isNullOrEmpty()) {
-                core.newDocument(pfd)
-            } else {
-                core.newDocument(pfd, password)
-            }
-            val pageCount = core.getPageCount(doc)
-            val name = UriDisplayNameResolver.resolve(context, uri)
-            AppResult.Success(
-                PdfDocumentHandle(
-                    uri = uri,
-                    displayName = name,
-                    pdfiumCore = core,
-                    pdfDocument = doc,
-                    pageCount = pageCount,
-                    password = password,
-                    fileDescriptor = pfd,
+            runPdfium {
+                val core = ensureInitialized()
+                val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+                    ?: return@runPdfium AppResult.Error("Cannot open file descriptor for $uri")
+                val doc = if (password.isNullOrEmpty()) {
+                    core.newDocument(pfd)
+                } else {
+                    core.newDocument(pfd, password)
+                }
+                val pageCount = core.getPageCount(doc)
+                val name = UriDisplayNameResolver.resolve(context, uri)
+                AppResult.Success(
+                    PdfDocumentHandle(
+                        uri = uri,
+                        displayName = name,
+                        pdfiumCore = core,
+                        pdfDocument = doc,
+                        pageCount = pageCount,
+                        password = password,
+                        fileDescriptor = pfd,
+                    ),
                 )
-            )
+            }
         } catch (e: Exception) {
             if (e.message?.contains("password", ignoreCase = true) == true) {
                 AppResult.Error("Password required or incorrect", e)
@@ -65,35 +123,45 @@ class PdfEngine @Inject constructor(
     }
 
     fun closeDocument(handle: PdfDocumentHandle) {
-        if (handle.isClosed) return
-        synchronized(handle) {
+        synchronized(pdfiumLock) {
             if (handle.isClosed) return
+            opsInFlight++
             try {
-                handle.pdfiumCore.closeDocument(handle.pdfDocument)
-            } catch (_: Exception) {
+                try {
+                    handle.pdfiumCore.closeDocument(handle.pdfDocument)
+                } catch (_: Exception) {
+                }
+                try {
+                    handle.fileDescriptor.close()
+                } catch (_: Exception) {
+                }
+                handle.isClosed = true
+            } finally {
+                opsInFlight--
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                (pdfiumLock as Object).notifyAll()
             }
-            try {
-                handle.fileDescriptor.close()
-            } catch (_: Exception) {
-            }
-            handle.isClosed = true
         }
     }
 
     fun getMeta(handle: PdfDocumentHandle): PdfMeta {
-        val meta = handle.pdfiumCore.getDocumentMeta(handle.pdfDocument)
-        return PdfMeta(
-            title = meta.title,
-            author = meta.author,
-            pageCount = handle.pageCount,
-        )
+        return runPdfiumFor(handle, PdfMeta(title = null, author = null, pageCount = 0)) {
+            val meta = handle.pdfiumCore.getDocumentMeta(handle.pdfDocument)
+            PdfMeta(
+                title = meta.title,
+                author = meta.author,
+                pageCount = handle.pageCount,
+            )
+        }
     }
 
     fun getPageSize(handle: PdfDocumentHandle, pageIndex: Int): Size {
-        handle.pdfiumCore.openPage(handle.pdfDocument, pageIndex)
-        val width = handle.pdfiumCore.getPageWidthPoint(handle.pdfDocument, pageIndex)
-        val height = handle.pdfiumCore.getPageHeightPoint(handle.pdfDocument, pageIndex)
-        return Size(width, height)
+        return runPdfiumFor(handle, Size(612, 792)) {
+            handle.pdfiumCore.openPage(handle.pdfDocument, pageIndex)
+            val width = handle.pdfiumCore.getPageWidthPoint(handle.pdfDocument, pageIndex)
+            val height = handle.pdfiumCore.getPageHeightPoint(handle.pdfDocument, pageIndex)
+            Size(width, height)
+        }
     }
 
     fun getPageDisplayHeight(handle: PdfDocumentHandle, pageIndex: Int, targetWidth: Int): Int {
@@ -108,38 +176,37 @@ class PdfEngine @Inject constructor(
         targetWidth: Int,
         config: Bitmap.Config = Bitmap.Config.ARGB_8888,
     ): Bitmap {
-        if (handle.isClosed) {
-            throw PdfRenderException("Document already closed")
+        return runPdfiumForRequired(handle) {
+            val core = handle.pdfiumCore
+            val doc = handle.pdfDocument
+            core.openPage(doc, pageIndex)
+            val pageWidth = core.getPageWidthPoint(doc, pageIndex)
+            val pageHeight = core.getPageHeightPoint(doc, pageIndex)
+            val renderSize = PdfRenderLimits.computeRenderSize(pageWidth, pageHeight, targetWidth)
+            val bitmapWidth = renderSize.width
+            val bitmapHeight = renderSize.height
+            val bitmap = try {
+                Bitmap.createBitmap(bitmapWidth, bitmapHeight, config)
+            } catch (e: OutOfMemoryError) {
+                throw PdfRenderException("Page too large to render (${bitmapWidth}x$bitmapHeight)", e)
+            }
+            try {
+                core.renderPageBitmap(
+                    doc,
+                    bitmap,
+                    pageIndex,
+                    0,
+                    0,
+                    bitmapWidth,
+                    bitmapHeight,
+                    true,
+                )
+            } catch (e: Exception) {
+                bitmap.recycle()
+                throw PdfRenderException(e.message ?: "Pdfium render failed", e)
+            }
+            bitmap
         }
-        val core = handle.pdfiumCore
-        val doc = handle.pdfDocument
-        core.openPage(doc, pageIndex)
-        val pageWidth = core.getPageWidthPoint(doc, pageIndex)
-        val pageHeight = core.getPageHeightPoint(doc, pageIndex)
-        val renderSize = PdfRenderLimits.computeRenderSize(pageWidth, pageHeight, targetWidth)
-        val bitmapWidth = renderSize.width
-        val bitmapHeight = renderSize.height
-        val bitmap = try {
-            Bitmap.createBitmap(bitmapWidth, bitmapHeight, config)
-        } catch (e: OutOfMemoryError) {
-            throw PdfRenderException("Page too large to render (${bitmapWidth}x$bitmapHeight)", e)
-        }
-        try {
-            core.renderPageBitmap(
-                doc,
-                bitmap,
-                pageIndex,
-                0,
-                0,
-                bitmapWidth,
-                bitmapHeight,
-                true,
-            )
-        } catch (e: Exception) {
-            bitmap.recycle()
-            throw PdfRenderException(e.message ?: "Pdfium render failed", e)
-        }
-        return bitmap
     }
 
     fun mapPageToDevice(
@@ -152,17 +219,19 @@ class PdfEngine @Inject constructor(
         pageX: Double,
         pageY: Double,
     ): android.graphics.Point {
-        return handle.pdfiumCore.mapPageCoordsToDevice(
-            handle.pdfDocument,
-            pageIndex,
-            startX,
-            startY,
-            sizeX,
-            sizeY,
-            0,
-            pageX,
-            pageY,
-        )
+        return runPdfiumFor(handle, android.graphics.Point(0, 0)) {
+            handle.pdfiumCore.mapPageCoordsToDevice(
+                handle.pdfDocument,
+                pageIndex,
+                startX,
+                startY,
+                sizeX,
+                sizeY,
+                0,
+                pageX,
+                pageY,
+            )
+        }
     }
 
     fun mapRectToDevice(
@@ -174,24 +243,28 @@ class PdfEngine @Inject constructor(
         sizeY: Int,
         rect: RectF,
     ): RectF {
-        return handle.pdfiumCore.mapRectToDevice(
-            handle.pdfDocument,
-            pageIndex,
-            startX,
-            startY,
-            sizeX,
-            sizeY,
-            0,
-            rect,
-        )
+        return runPdfiumFor(handle, RectF()) {
+            handle.pdfiumCore.mapRectToDevice(
+                handle.pdfDocument,
+                pageIndex,
+                startX,
+                startY,
+                sizeX,
+                sizeY,
+                0,
+                rect,
+            )
+        }
     }
 
     fun getBookmarks(handle: PdfDocumentHandle): List<PdfBookmark> {
-        return try {
-            val bookmarks = handle.pdfiumCore.getTableOfContents(handle.pdfDocument)
-            bookmarks.map { toBookmark(it) }
-        } catch (_: Exception) {
-            emptyList()
+        return runPdfiumFor(handle, emptyList()) {
+            try {
+                val bookmarks = handle.pdfiumCore.getTableOfContents(handle.pdfDocument)
+                bookmarks.map { toBookmark(it) }
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 

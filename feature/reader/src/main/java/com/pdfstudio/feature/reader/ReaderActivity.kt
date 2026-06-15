@@ -21,6 +21,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.core.view.doOnNextLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.pdfstudio.core.pdfannot.CoordinateMapper
@@ -31,6 +32,7 @@ import com.pdfstudio.feature.editor.SignaturePadActivity
 import com.pdfstudio.feature.pageops.PageOpsDialogFragment
 import com.pdfstudio.feature.reader.databinding.ActivityReaderBinding
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
@@ -44,6 +46,14 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
     private var pendingSplitRange: IntRange? = null
     private var isUserScrolling = false
     private var isPinchZooming = false
+    private var isHorizontalPagePanning = false
+    private var panTargetContainer: ZoomablePageContainer? = null
+    private var panDownX = 0f
+    private var panDownY = 0f
+    private var panNeedsDown = false
+    private val panTouchSlop by lazy {
+        android.view.ViewConfiguration.get(this).scaledTouchSlop
+    }
     private var pinchStartZoom = 1f
     private var pinchCumulativeScale = 1f
     private lateinit var scaleDetector: ScaleGestureDetector
@@ -115,6 +125,13 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         viewModel.open(uri)
     }
 
+    override fun onDestroy() {
+        if (isFinishing) {
+            viewModel.releaseReader()
+        }
+        super.onDestroy()
+    }
+
     private fun runOnRecyclerIdle(block: () -> Unit) {
         binding.recyclerPages.post {
             val rv = binding.recyclerPages
@@ -126,16 +143,49 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         }
     }
 
+    private fun applyVisibleBitmapsFromCache() {
+        val pageCount = viewModel.uiState.value.pageCount
+        if (pageCount <= 0) return
+        val lm = binding.recyclerPages.layoutManager as? LinearLayoutManager
+        val first = lm?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+        val last = lm?.findLastVisibleItemPosition() ?: RecyclerView.NO_POSITION
+        val indices = if (first >= 0 && last >= first) {
+            first..last
+        } else {
+            0 until minOf(3, pageCount)
+        }
+        pageAdapter.applyBitmapToPages(binding.recyclerPages, indices)
+    }
+
+    private fun applyRenderState(state: RenderState) {
+        when (state) {
+            is RenderState.Success -> {
+                pageAdapter.applyBitmapToPage(binding.recyclerPages, state.pageIndex)
+            }
+            is RenderState.Error -> {
+                Toast.makeText(
+                    this,
+                    getString(R.string.page_render_failed, state.pageIndex + 1, state.message),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            else -> Unit
+        }
+    }
+
     private fun onPageVisible(page: Int) {
         viewModel.ensurePageHeights(page, page + 2)
-        if (viewModel.getCachedBitmap(page) != null) {
-            binding.recyclerPages.post { pageAdapter.notifyPageRenderComplete(page) }
-        } else {
+        if (viewModel.getCachedBitmap(page) == null) {
             viewModel.requestRender(page)
         }
     }
 
     private fun updateVisiblePageIndicator() {
+        val rv = binding.recyclerPages
+        if (rv.isComputingLayout) {
+            rv.post { updateVisiblePageIndicator() }
+            return
+        }
         val lm = binding.recyclerPages.layoutManager as LinearLayoutManager
         val first = lm.findFirstVisibleItemPosition()
         val last = lm.findLastVisibleItemPosition()
@@ -144,9 +194,6 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         pageAdapter.currentPage = current
         viewModel.setCurrentPage(current)
         updatePageIndicator(current)
-        if (!isPinchZooming) {
-            pageAdapter.setEditableRange(first, last)
-        }
         if (!isUserScrolling) {
             viewModel.ensurePageHeights(first, last + 2)
         }
@@ -156,14 +203,22 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         val lm = binding.recyclerPages.layoutManager as LinearLayoutManager
         val first = lm.findFirstVisibleItemPosition()
         val last = lm.findLastVisibleItemPosition()
-        if (first < 0) return
+        if (first < 0) {
+            binding.recyclerPages.doOnNextLayout {
+                viewModel.requestRender(0)
+                pageAdapter.applyBitmapToPage(binding.recyclerPages, 0)
+            }
+            return
+        }
         val current = if (last > first) (first + last) / 2 else first
         pageAdapter.currentPage = current
         viewModel.setCurrentPage(current)
         updatePageIndicator(current)
-        pageAdapter.setEditableRange(first, last)
-        viewModel.ensurePageHeights(first, last + 2)
         val inEditMode = viewModel.uiState.value.editMode != EditorMode.READ
+        if (inEditMode) {
+            pageAdapter.setEditableRange(first, last)
+        }
+        viewModel.ensurePageHeights(first, last + 2)
         if (!inEditMode || viewModel.getCachedBitmap(current) == null) {
             viewModel.requestRender(current)
         }
@@ -172,9 +227,7 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
                 if (i != current) {
                     viewModel.preloadPage(i)
                 }
-                if (viewModel.getCachedBitmap(i) != null) {
-                    pageAdapter.notifyPageRenderComplete(i)
-                }
+                pageAdapter.applyBitmapToPage(binding.recyclerPages, i)
             }
         }
     }
@@ -190,15 +243,22 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
             }
 
             override fun onScale(detector: ScaleGestureDetector): Boolean {
-                pinchCumulativeScale *= detector.scaleFactor
+                val factor = detector.scaleFactor
+                pinchCumulativeScale *= factor
                 val preview = (pinchStartZoom * pinchCumulativeScale)
                     .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
+                pageAdapter.zoomScale = preview
+                pageAdapter.zoomHeightScale = preview / pinchStartZoom
+                pageAdapter.applyPinchFocalPoint(binding.recyclerPages, detector.focusX, detector.focusY, factor)
+                pageAdapter.notifyZoomLayoutChanged(resetPan = false)
+                compensateVerticalFocalScroll(detector.focusY, factor)
                 updatePageIndicator(pageAdapter.currentPage, preview)
                 return true
             }
 
             override fun onScaleEnd(detector: ScaleGestureDetector) {
                 isPinchZooming = false
+                pageAdapter.zoomHeightScale = 1f
                 val finalScale = (pinchStartZoom * pinchCumulativeScale)
                     .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
                 applyZoom(finalScale)
@@ -210,7 +270,6 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
 
         pageAdapter = PdfPageAdapter(
             pageWidth = viewportWidth,
-            contentWidthProvider = { viewModel.getPageContentWidth() },
             bitmapProvider = { page -> viewModel.getCachedBitmap(page) },
             onPageVisible = { page -> onPageVisible(page) },
             onSelectionFinished = { page, rect, type ->
@@ -224,6 +283,7 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         binding.recyclerPages.layoutManager = LinearLayoutManager(this)
         binding.recyclerPages.adapter = pageAdapter
         binding.recyclerPages.setItemViewCacheSize(4)
+        binding.recyclerPages.itemAnimator = null
         binding.recyclerPages.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 updateVisiblePageIndicator()
@@ -248,15 +308,96 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
                     scaleDetector.onTouchEvent(e)
                     return true
                 }
-                return false
+                if (pageAdapter.zoomScale > 1.01f) {
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            panDownX = e.x
+                            panDownY = e.y
+                            isHorizontalPagePanning = false
+                            panNeedsDown = false
+                            panTargetContainer = findZoomContainerUnder(rv, e.x, e.y)
+                                ?.takeIf { it.isHorizontallyPannable() }
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            if (panTargetContainer != null && !isHorizontalPagePanning) {
+                                val dx = e.x - panDownX
+                                val dy = e.y - panDownY
+                                if (kotlin.math.hypot(dx.toDouble(), dy.toDouble()) > panTouchSlop) {
+                                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                                        isHorizontalPagePanning = true
+                                        panNeedsDown = true
+                                    } else {
+                                        panTargetContainer = null
+                                    }
+                                }
+                            }
+                            if (isHorizontalPagePanning) return true
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            if (isHorizontalPagePanning) {
+                                dispatchPanToContainer(rv, e)
+                                isHorizontalPagePanning = false
+                                panTargetContainer = null
+                                panNeedsDown = false
+                                return true
+                            }
+                            panTargetContainer = null
+                        }
+                    }
+                }
+                return isHorizontalPagePanning
             }
 
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
                 if (e.pointerCount >= 2 || isPinchZooming) {
                     scaleDetector.onTouchEvent(e)
+                    return
+                }
+                if (isHorizontalPagePanning) {
+                    dispatchPanToContainer(rv, e)
+                    if (e.actionMasked == MotionEvent.ACTION_UP ||
+                        e.actionMasked == MotionEvent.ACTION_CANCEL
+                    ) {
+                        isHorizontalPagePanning = false
+                        panTargetContainer = null
+                        panNeedsDown = false
+                    }
                 }
             }
         })
+    }
+
+    private fun findZoomContainerUnder(rv: RecyclerView, x: Float, y: Float): ZoomablePageContainer? {
+        val child = rv.findChildViewUnder(x, y) ?: return null
+        return child.findViewById(R.id.zoomContainer)
+    }
+
+    private fun dispatchPanToContainer(rv: RecyclerView, event: MotionEvent) {
+        val container = panTargetContainer ?: return
+        val local = MotionEvent.obtain(event)
+        val rvLoc = IntArray(2)
+        rv.getLocationOnScreen(rvLoc)
+        val containerLoc = IntArray(2)
+        container.getLocationOnScreen(containerLoc)
+        local.offsetLocation(
+            (rvLoc[0] - containerLoc[0]).toFloat(),
+            (rvLoc[1] - containerLoc[1]).toFloat(),
+        )
+        if (panNeedsDown) {
+            val down = MotionEvent.obtain(
+                event.downTime,
+                event.eventTime,
+                MotionEvent.ACTION_DOWN,
+                panDownX + rvLoc[0] - containerLoc[0],
+                panDownY + rvLoc[1] - containerLoc[1],
+                event.metaState,
+            )
+            container.handlePanMotionEvent(down)
+            down.recycle()
+            panNeedsDown = false
+        }
+        container.handlePanMotionEvent(local)
+        local.recycle()
     }
 
     private fun applyZoom(scale: Float) {
@@ -264,10 +405,19 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         pageAdapter.zoomScale = scale
         pageAdapter.setPageHeights(viewModel.uiState.value.pageHeights)
         runOnRecyclerIdle {
-            pageAdapter.notifyZoomChanged()
-            binding.recyclerPages.post { renderFocalAndPreload() }
+            pageAdapter.notifyZoomLayoutChanged(resetPan = false)
+            renderFocalAndPreload()
         }
         updatePageIndicator(pageAdapter.currentPage, scale)
+    }
+
+    /** 捏合放大时补偿纵向滚动，使焦点附近内容尽量保持在双指中心 */
+    private fun compensateVerticalFocalScroll(focusY: Float, scaleFactor: Float) {
+        if (scaleFactor == 1f) return
+        val delta = (focusY * (scaleFactor - 1f)).toInt()
+        if (delta != 0) {
+            binding.recyclerPages.scrollBy(0, delta)
+        }
     }
 
     private fun setupToolbar() {
@@ -294,16 +444,25 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
                     if (state.pageHeights != lastPageHeights && state.pageHeights.isNotEmpty()) {
                         lastPageHeights = state.pageHeights
                         if (pageAdapter.itemCount > 0) {
-                            runOnRecyclerIdle { pageAdapter.notifyZoomChanged() }
+                            binding.recyclerPages.post {
+                                pageAdapter.notifyZoomLayoutChanged()
+                            }
                         }
                     }
-                    runOnRecyclerIdle {
-                        val newDocument = state.documentUri != null && state.documentUri != lastDocumentUri
-                        if (newDocument) lastDocumentUri = state.documentUri
-                        if (pageAdapter.submitPageCount(state.pageCount, forceRefresh = newDocument)) {
-                            lastPageHeights = state.pageHeights
+                    val newDocument = state.documentUri != null && state.documentUri != lastDocumentUri
+                    if (newDocument) lastDocumentUri = state.documentUri
+                    if (pageAdapter.submitPageCount(state.pageCount, forceRefresh = newDocument)) {
+                        lastPageHeights = state.pageHeights
+                        binding.recyclerPages.post {
                             pageAdapter.notifyDataSetChanged()
-                            binding.recyclerPages.post { renderFocalAndPreload() }
+                            binding.recyclerPages.doOnNextLayout {
+                                viewModel.requestRender(0)
+                                val end = minOf(3, state.pageCount)
+                                if (end > 0) {
+                                    pageAdapter.applyBitmapToPages(binding.recyclerPages, 0 until end)
+                                }
+                                renderFocalAndPreload()
+                            }
                         }
                     }
                     val editModeChanged = pageAdapter.editMode != state.editMode
@@ -354,23 +513,12 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
     private fun observeRender() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.renderState.collect { state ->
-                    when (state) {
-                        is RenderState.Success -> {
-                            binding.recyclerPages.post {
-                                pageAdapter.notifyPageRenderComplete(state.pageIndex)
-                            }
-                        }
-                        is RenderState.Error -> {
-                            Toast.makeText(
-                                this@ReaderActivity,
-                                getString(R.string.page_render_failed, state.pageIndex + 1, state.message),
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        }
-                        else -> Unit
-                    }
+                applyVisibleBitmapsFromCache()
+                val current = viewModel.renderState.value
+                if (current is RenderState.Success) {
+                    applyRenderState(current)
                 }
+                viewModel.renderState.collect { applyRenderState(it) }
             }
         }
     }
