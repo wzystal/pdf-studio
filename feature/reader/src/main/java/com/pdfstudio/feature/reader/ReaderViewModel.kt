@@ -207,17 +207,24 @@ class ReaderViewModel @Inject constructor(
         if (abs(clamped - _uiState.value.zoomScale) < 0.01f) return
 
         val handle = pdfRepository.getCurrentDocument()
+        val oldZoom = _uiState.value.zoomScale
         val newRenderWidth = (baseScreenWidth * clamped).toInt().coerceIn(320, 4096)
         val widthBucketChanged = abs(newRenderWidth - targetWidth) > 32
         targetWidth = newRenderWidth
 
         if (handle != null) {
-            pageHeightsResolved = BooleanArray(handle.pageCount)
-            val heights = MutableList(handle.pageCount) { defaultPageHeight() }
+            val prevHeights = _uiState.value.pageHeights
+            val heights = if (prevHeights.size == handle.pageCount && oldZoom > 0f) {
+                prevHeights.map { (it * clamped / oldZoom).toInt().coerceAtLeast(1) }.toMutableList()
+            } else {
+                MutableList(handle.pageCount) { defaultPageHeight() }
+            }
             val current = _uiState.value.currentPage
-            if (current in 0 until handle.pageCount) {
+            if (widthBucketChanged && current in 0 until handle.pageCount) {
                 heights[current] = pdfEngine.getPageDisplayHeight(handle, current, newRenderWidth)
-                pageHeightsResolved[current] = true
+                if (current < pageHeightsResolved.size) {
+                    pageHeightsResolved[current] = true
+                }
             }
             _uiState.value = _uiState.value.copy(
                 zoomScale = clamped,
@@ -229,8 +236,6 @@ class ReaderViewModel @Inject constructor(
 
         if (widthBucketChanged) {
             renderEngine.cancelAllRenders()
-            pdfEngine.awaitIdle()
-            renderEngine.evictCache()
         }
     }
 

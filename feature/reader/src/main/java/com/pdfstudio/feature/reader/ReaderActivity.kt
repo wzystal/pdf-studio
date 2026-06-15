@@ -46,6 +46,14 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
     private var pendingSplitRange: IntRange? = null
     private var isUserScrolling = false
     private var isPinchZooming = false
+    private var isHorizontalPagePanning = false
+    private var panTargetContainer: ZoomablePageContainer? = null
+    private var panDownX = 0f
+    private var panDownY = 0f
+    private var panNeedsDown = false
+    private val panTouchSlop by lazy {
+        android.view.ViewConfiguration.get(this).scaledTouchSlop
+    }
     private var pinchStartZoom = 1f
     private var pinchCumulativeScale = 1f
     private lateinit var scaleDetector: ScaleGestureDetector
@@ -235,15 +243,22 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
             }
 
             override fun onScale(detector: ScaleGestureDetector): Boolean {
-                pinchCumulativeScale *= detector.scaleFactor
+                val factor = detector.scaleFactor
+                pinchCumulativeScale *= factor
                 val preview = (pinchStartZoom * pinchCumulativeScale)
                     .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
+                pageAdapter.zoomScale = preview
+                pageAdapter.zoomHeightScale = preview / pinchStartZoom
+                pageAdapter.applyPinchFocalPoint(binding.recyclerPages, detector.focusX, detector.focusY, factor)
+                pageAdapter.notifyZoomLayoutChanged(resetPan = false)
+                compensateVerticalFocalScroll(detector.focusY, factor)
                 updatePageIndicator(pageAdapter.currentPage, preview)
                 return true
             }
 
             override fun onScaleEnd(detector: ScaleGestureDetector) {
                 isPinchZooming = false
+                pageAdapter.zoomHeightScale = 1f
                 val finalScale = (pinchStartZoom * pinchCumulativeScale)
                     .coerceIn(ReaderViewModel.MIN_ZOOM, ReaderViewModel.MAX_ZOOM)
                 applyZoom(finalScale)
@@ -293,15 +308,96 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
                     scaleDetector.onTouchEvent(e)
                     return true
                 }
-                return false
+                if (pageAdapter.zoomScale > 1.01f) {
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            panDownX = e.x
+                            panDownY = e.y
+                            isHorizontalPagePanning = false
+                            panNeedsDown = false
+                            panTargetContainer = findZoomContainerUnder(rv, e.x, e.y)
+                                ?.takeIf { it.isHorizontallyPannable() }
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            if (panTargetContainer != null && !isHorizontalPagePanning) {
+                                val dx = e.x - panDownX
+                                val dy = e.y - panDownY
+                                if (kotlin.math.hypot(dx.toDouble(), dy.toDouble()) > panTouchSlop) {
+                                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                                        isHorizontalPagePanning = true
+                                        panNeedsDown = true
+                                    } else {
+                                        panTargetContainer = null
+                                    }
+                                }
+                            }
+                            if (isHorizontalPagePanning) return true
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            if (isHorizontalPagePanning) {
+                                dispatchPanToContainer(rv, e)
+                                isHorizontalPagePanning = false
+                                panTargetContainer = null
+                                panNeedsDown = false
+                                return true
+                            }
+                            panTargetContainer = null
+                        }
+                    }
+                }
+                return isHorizontalPagePanning
             }
 
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
                 if (e.pointerCount >= 2 || isPinchZooming) {
                     scaleDetector.onTouchEvent(e)
+                    return
+                }
+                if (isHorizontalPagePanning) {
+                    dispatchPanToContainer(rv, e)
+                    if (e.actionMasked == MotionEvent.ACTION_UP ||
+                        e.actionMasked == MotionEvent.ACTION_CANCEL
+                    ) {
+                        isHorizontalPagePanning = false
+                        panTargetContainer = null
+                        panNeedsDown = false
+                    }
                 }
             }
         })
+    }
+
+    private fun findZoomContainerUnder(rv: RecyclerView, x: Float, y: Float): ZoomablePageContainer? {
+        val child = rv.findChildViewUnder(x, y) ?: return null
+        return child.findViewById(R.id.zoomContainer)
+    }
+
+    private fun dispatchPanToContainer(rv: RecyclerView, event: MotionEvent) {
+        val container = panTargetContainer ?: return
+        val local = MotionEvent.obtain(event)
+        val rvLoc = IntArray(2)
+        rv.getLocationOnScreen(rvLoc)
+        val containerLoc = IntArray(2)
+        container.getLocationOnScreen(containerLoc)
+        local.offsetLocation(
+            (rvLoc[0] - containerLoc[0]).toFloat(),
+            (rvLoc[1] - containerLoc[1]).toFloat(),
+        )
+        if (panNeedsDown) {
+            val down = MotionEvent.obtain(
+                event.downTime,
+                event.eventTime,
+                MotionEvent.ACTION_DOWN,
+                panDownX + rvLoc[0] - containerLoc[0],
+                panDownY + rvLoc[1] - containerLoc[1],
+                event.metaState,
+            )
+            container.handlePanMotionEvent(down)
+            down.recycle()
+            panNeedsDown = false
+        }
+        container.handlePanMotionEvent(local)
+        local.recycle()
     }
 
     private fun applyZoom(scale: Float) {
@@ -309,10 +405,19 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
         pageAdapter.zoomScale = scale
         pageAdapter.setPageHeights(viewModel.uiState.value.pageHeights)
         runOnRecyclerIdle {
-            pageAdapter.notifyZoomChanged()
-            binding.recyclerPages.post { renderFocalAndPreload() }
+            pageAdapter.notifyZoomLayoutChanged(resetPan = false)
+            renderFocalAndPreload()
         }
         updatePageIndicator(pageAdapter.currentPage, scale)
+    }
+
+    /** 捏合放大时补偿纵向滚动，使焦点附近内容尽量保持在双指中心 */
+    private fun compensateVerticalFocalScroll(focusY: Float, scaleFactor: Float) {
+        if (scaleFactor == 1f) return
+        val delta = (focusY * (scaleFactor - 1f)).toInt()
+        if (delta != 0) {
+            binding.recyclerPages.scrollBy(0, delta)
+        }
     }
 
     private fun setupToolbar() {
@@ -340,7 +445,7 @@ class ReaderActivity : AppCompatActivity(), PageOpsDialogFragment.Callback {
                         lastPageHeights = state.pageHeights
                         if (pageAdapter.itemCount > 0) {
                             binding.recyclerPages.post {
-                                pageAdapter.notifyZoomChanged()
+                                pageAdapter.notifyZoomLayoutChanged()
                             }
                         }
                     }

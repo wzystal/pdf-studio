@@ -69,8 +69,13 @@ class RenderEngine @Inject constructor(
     fun previewWidth(targetWidth: Int): Int = max(targetWidth / 2, 360)
 
     fun getCached(pageIndex: Int, targetWidth: Int): Bitmap? {
-        return bitmapCache.get(PageRenderKey(pageIndex, targetWidth))
-            ?: bitmapCache.get(PageRenderKey(pageIndex, previewWidth(targetWidth)))
+        bitmapCache.get(PageRenderKey(pageIndex, targetWidth))?.let { return it }
+        bitmapCache.get(PageRenderKey(pageIndex, previewWidth(targetWidth)))?.let { return it }
+        // 缩放切换分辨率桶时，先用同页已有缓存顶住，避免黑屏
+        return bitmapCache.snapshot()
+            .filterKeys { it.pageIndex == pageIndex }
+            .maxByOrNull { it.key.widthBucket }
+            ?.value
     }
 
     /** 取消所有进行中的渲染（含 preload），关闭文档前必须调用 */

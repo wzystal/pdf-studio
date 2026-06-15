@@ -31,6 +31,8 @@ class PdfPageAdapter(
     var editMode: EditorMode = EditorMode.READ
     var currentPage: Int = 0
     var zoomScale: Float = 1f
+    /** 捏合手势过程中临时缩放页高，松手后恢复为 1 */
+    var zoomHeightScale: Float = 1f
     private var editableRange: IntRange = IntRange.EMPTY
     private var attachedRecyclerView: RecyclerView? = null
 
@@ -58,12 +60,49 @@ class PdfPageAdapter(
         pageHeights = heights.toIntArray()
     }
 
-    fun notifyZoomChanged() {
+    fun notifyZoomLayoutChanged(resetPan: Boolean = false) {
         if (itemCount <= 0) return
         for (page in 0 until itemCount) {
-            applyToBoundHolder(page) {
-                it.bindZoom(page)
-                it.bindBitmap(page)
+            applyToBoundHolder(page) { it.bindZoom(page, resetPan) }
+        }
+    }
+
+    /** 捏合缩放时，以焦点为中心调整可见页的平移偏移 */
+    fun applyPinchFocalPoint(
+        recyclerView: RecyclerView,
+        focusX: Float,
+        focusY: Float,
+        scaleFactor: Float,
+    ) {
+        if (scaleFactor == 1f) return
+        val lm = recyclerView.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager ?: return
+        val first = lm.findFirstVisibleItemPosition()
+        val last = lm.findLastVisibleItemPosition()
+        if (first < 0) return
+        val rvLoc = IntArray(2)
+        recyclerView.getLocationInWindow(rvLoc)
+        val focusWinX = rvLoc[0] + focusX
+        val focusWinY = rvLoc[1] + focusY
+        var applied = false
+        for (page in first..last) {
+            val holder = recyclerView.findViewHolderForAdapterPosition(page) as? PageViewHolder ?: continue
+            if (holder.scaleAroundFocalPoint(focusWinX, focusWinY, scaleFactor)) {
+                applied = true
+            }
+        }
+        if (!applied) {
+            val center = (first + last) / 2
+            (recyclerView.findViewHolderForAdapterPosition(center) as? PageViewHolder)
+                ?.scaleAroundCenter(scaleFactor)
+        }
+    }
+
+    fun notifyZoomChanged() {
+        notifyZoomLayoutChanged()
+        if (itemCount <= 0) return
+        for (page in 0 until itemCount) {
+            if (bitmapProvider(page) != null) {
+                applyToBoundHolder(page) { it.bindBitmap(page) }
             }
         }
     }
@@ -175,13 +214,18 @@ class PdfPageAdapter(
 
         init {
             binding.zoomContainer.onRequestParentDisallowIntercept = { disallow ->
-                binding.root.parent?.requestDisallowInterceptTouchEvent(disallow)
+                var parent = binding.root.parent
+                while (parent != null) {
+                    parent.requestDisallowInterceptTouchEvent(disallow)
+                    if (parent is RecyclerView) break
+                    parent = parent.parent
+                }
             }
         }
 
         fun bind(pageIndex: Int) {
             binding.overlay.resetTransientState()
-            bindZoom(pageIndex)
+            bindZoom(pageIndex, resetPan = true)
             bindBitmap(pageIndex)
             bindAnnotations(pageIndex)
             bindEditMode(pageIndex)
@@ -199,22 +243,40 @@ class PdfPageAdapter(
             }
         }
 
-        fun bindZoom(pageIndex: Int) {
-            val height = heightFor(pageIndex)
+        fun scaleAroundFocalPoint(focusWinX: Float, focusWinY: Float, scaleFactor: Float): Boolean {
+            val container = binding.zoomContainer
+            val containerLoc = IntArray(2)
+            container.getLocationInWindow(containerLoc)
+            val localX = focusWinX - containerLoc[0]
+            val localY = focusWinY - containerLoc[1]
+            if (localX < 0 || localY < 0 || localX > container.width || localY > container.height) {
+                return false
+            }
+            container.scaleAroundPoint(localX, localY, scaleFactor)
+            return true
+        }
+
+        fun scaleAroundCenter(scaleFactor: Float) {
+            val container = binding.zoomContainer
+            container.scaleAroundPoint(container.width / 2f, container.height / 2f, scaleFactor)
+        }
+
+        fun bindZoom(pageIndex: Int, resetPan: Boolean = false) {
+            val height = (heightFor(pageIndex) * zoomHeightScale).toInt().coerceAtLeast(1)
             val contentWidth = (pageWidth * zoomScale).toInt().coerceAtLeast(1)
             binding.zoomContainer.setContentSize(contentWidth, height)
-            binding.zoomContainer.resetPan()
+            if (resetPan) {
+                binding.zoomContainer.resetPan()
+            }
         }
 
         fun bindBitmap(pageIndex: Int) {
             val bitmap = bitmapProvider(pageIndex)
             if (bitmap != null && !bitmap.isRecycled) {
                 binding.ivPage.setImageBitmap(bitmap)
-            } else {
-                binding.ivPage.setImageDrawable(null)
+                binding.ivPage.requestLayout()
+                binding.zoomContainer.requestLayout()
             }
-            binding.ivPage.requestLayout()
-            binding.zoomContainer.requestLayout()
         }
 
         fun bindAnnotations(pageIndex: Int) {
@@ -224,6 +286,8 @@ class PdfPageAdapter(
         fun bindEditMode(pageIndex: Int) {
             val editable = editMode != EditorMode.READ && pageIndex in editableRange
             binding.overlay.editMode = if (editable) editMode else EditorMode.READ
+            binding.overlay.isClickable = editable
+            binding.overlay.isFocusable = editable
             binding.zoomContainer.panEnabled = !editable
         }
     }
