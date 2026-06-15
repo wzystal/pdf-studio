@@ -23,6 +23,8 @@ import com.pdfstudio.core.pdfrender.RenderEngine
 import com.pdfstudio.core.storage.RecentFileRepository
 import com.pdfstudio.feature.editor.EditorMode
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -72,6 +74,7 @@ class ReaderViewModel @Inject constructor(
     private var baseScreenWidth: Int = 1080
     private var targetWidth: Int = 1080
     private var pageHeightsResolved = BooleanArray(0)
+    private var pageHeightsJob: Job? = null
 
     companion object {
         const val MIN_ZOOM = 0.5f
@@ -95,6 +98,7 @@ class ReaderViewModel @Inject constructor(
 
     fun open(uri: Uri, password: String? = null) {
         pendingUri = uri
+        stopRenderingAndCloseDocument()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null, needsPassword = false)
             when (val result = pdfRepository.open(uri, password)) {
@@ -149,14 +153,16 @@ class ReaderViewModel @Inject constructor(
     }
 
     fun ensurePageHeights(from: Int, to: Int) {
-        viewModelScope.launch {
+        pageHeightsJob?.cancel()
+        pageHeightsJob = viewModelScope.launch(Dispatchers.IO) {
             val handle = pdfRepository.getCurrentDocument() ?: return@launch
+            if (handle.isClosed) return@launch
             ensurePageHeightsInternal(handle, from, to)
         }
     }
 
     private suspend fun ensurePageHeightsInternal(handle: PdfDocumentHandle, from: Int, to: Int) {
-        if (handle.pageCount <= 0) return
+        if (handle.isClosed || handle.pageCount <= 0) return
         val heights = _uiState.value.pageHeights.toMutableList()
         if (heights.size != handle.pageCount) return
         var changed = false
@@ -222,6 +228,8 @@ class ReaderViewModel @Inject constructor(
         }
 
         if (widthBucketChanged) {
+            renderEngine.cancelAllRenders()
+            pdfEngine.awaitIdle()
             renderEngine.evictCache()
         }
     }
@@ -410,10 +418,22 @@ class ReaderViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(message = null, error = null)
     }
 
-    override fun onCleared() {
-        renderEngine.cancelPending()
+    /** Activity 退出时提前停止渲染并关闭文档，避免 pdfium 在后台继续访问已关闭句柄 */
+    fun releaseReader() {
+        stopRenderingAndCloseDocument()
+    }
+
+    private fun stopRenderingAndCloseDocument() {
+        pageHeightsJob?.cancel()
+        pageHeightsJob = null
+        renderEngine.cancelAllRenders()
+        pdfEngine.awaitIdle()
         renderEngine.evictCache()
         pdfRepository.close()
+    }
+
+    override fun onCleared() {
+        releaseReader()
         super.onCleared()
     }
 }

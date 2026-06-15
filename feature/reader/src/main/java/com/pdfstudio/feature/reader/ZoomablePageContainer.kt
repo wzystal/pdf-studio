@@ -74,6 +74,12 @@ class ZoomablePageContainer @JvmOverloads constructor(
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
+        if (childCount > 0) {
+            val child = getChildAt(0)
+            val cw = contentWidthPx.coerceAtLeast(right - left)
+            val ch = contentHeightPx.coerceAtLeast(bottom - top)
+            child.layout(0, 0, cw, ch)
+        }
         clampTranslation()
         applyTranslation()
     }
